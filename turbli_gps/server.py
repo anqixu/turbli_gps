@@ -45,6 +45,12 @@ def previous_run(now: datetime) -> datetime:
     return utc_now.replace(hour=(utc_now.hour // 6) * 6)
 
 
+def next_forecast_hour(now: datetime, run_dt: datetime) -> int:
+    elapsed_hours = (now - run_dt).total_seconds() / 3600
+    rounded = int((elapsed_hours + 2.999) // 3) * 3
+    return min(48, max(6, rounded))
+
+
 class TurbliApp:
     def __init__(self, root: Path = ROOT):
         self.root = root
@@ -292,8 +298,8 @@ class TurbliApp:
         start = previous_run(current)
         for run_index in range(0, 8):
             run_dt = start - timedelta(hours=run_index * 6)
-            max_hour = min(48, int((current - run_dt).total_seconds() // 3600 // 3 * 3))
-            for forecast_hour in range(max_hour, -1, -3):
+            first_hour = next_forecast_hour(current, run_dt)
+            for forecast_hour in range(first_hour, 49, 3):
                 date = run_dt.strftime("%Y%m%d")
                 run = f"{run_dt.hour:02d}"
                 hour = f"{forecast_hour:03d}"
@@ -301,8 +307,8 @@ class TurbliApp:
                     yield date, run, hour
         for run_index in range(0, 8):
             run_dt = start - timedelta(hours=run_index * 6)
-            max_hour = min(48, int((current - run_dt).total_seconds() // 3600 // 3 * 3))
-            for forecast_hour in range(max_hour, -1, -3):
+            first_hour = next_forecast_hour(current, run_dt)
+            for forecast_hour in range(first_hour, 49, 3):
                 yield run_dt.strftime("%Y%m%d"), f"{run_dt.hour:02d}", f"{forecast_hour:03d}"
 
     def turbli_source_id(self, date: str, run: str, hour: str, altitude_feet: int, region: str) -> str:

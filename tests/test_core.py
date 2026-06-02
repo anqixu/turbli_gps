@@ -115,9 +115,9 @@ class PersistenceTests(unittest.TestCase):
             first_request = mocked.call_args_list[0].args[0]
             self.assertEqual(
                 first_request.full_url,
-                "https://turbli.com/databases/GTG_20260602_12/figures/CAT_003_33000_us.jpg",
+                "https://turbli.com/databases/GTG_20260602_12/figures/CAT_006_33000_us.jpg",
             )
-            self.assertEqual(source["forecastTime"], "2026-06-02T15:00:00Z")
+            self.assertEqual(source["forecastTime"], "2026-06-02T18:00:00Z")
             cached = app.fetch_turbli_image({"latest": True}, now=now)
             self.assertTrue(cached["cacheHit"])
 
