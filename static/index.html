@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Turbli GPS</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app panel-collapsed">
+      <section class="map-shell">
+        <div id="map" class="map">
+          <div id="mapPlane" class="map-plane">
+            <div id="worldLayer" class="world-layer">
+              <svg id="mapSvg" class="map-svg" viewBox="0 0 1000 620" aria-label="US state outline map"></svg>
+              <img id="overlayImage" class="overlay-image" alt="">
+              <div id="accuracyRing" class="accuracy-ring" hidden></div>
+              <div id="altitudeRing" class="altitude-ring" hidden></div>
+            </div>
+          </div>
+          <div id="positionDot" class="position-dot" hidden></div>
+          <div id="pasteHint" class="paste-hint">Paste, drop, or upload a Turbli image</div>
+        </div>
+      </section>
+
+      <aside id="panel" class="panel">
+        <div class="panel-rail" aria-label="Map tools">
+          <button id="panelHandle" class="panel-handle" type="button" aria-label="Toggle controls" title="Toggle controls">☰</button>
+          <button id="modeToggle" class="mode-toggle icon-button" type="button" aria-label="Align image" title="Align image">🖼️</button>
+          <button id="locateButton" class="gps-toggle icon-button" type="button" aria-label="Start GPS" title="Start GPS">🧭</button>
+          <button id="fitButton" class="icon-button" type="button" aria-label="Reset map" title="Reset map">🔄</button>
+          <button id="turbliFetchButton" class="icon-button" type="button" aria-label="Fetch latest Turbli image" title="Fetch latest Turbli image">☁️</button>
+          <button id="uploadButton" class="icon-button" type="button" aria-label="Paste or upload image" title="Paste or upload image">📋</button>
+          <input id="uploadInput" class="visually-hidden" type="file" accept="image/*">
+        </div>
+        <div class="panel-content">
+
+        <div class="panel-row">
+          <label for="projectionSelect">Projection</label>
+          <select id="projectionSelect">
+            <option value="equirectangular">Equirectangular</option>
+            <option value="web_mercator" selected>Web Mercator</option>
+            <option value="usa_albers">USA Albers</option>
+          </select>
+        </div>
+
+        <div class="panel-grid">
+          <div class="wide"><span>Lat, Lon</span><button id="coordValue" class="copy-value" type="button" title="Copy coordinates">--</button></div>
+          <div class="wide"><span>Altitude</span><strong id="altitudeValue">--</strong></div>
+        </div>
+
+        <details class="meta">
+          <summary>Image details</summary>
+          <div><span>Source</span><strong id="sourceValue">None</strong></div>
+          <div><span>Scraped</span><strong id="scrapeValue">--</strong></div>
+          <div><span>Forecast</span><strong id="forecastValue">--</strong></div>
+          <div><span>Altitude</span><strong id="sourceAltitudeValue">--</strong></div>
+        </details>
+
+        <div class="controls">
+          <label>Scale <input id="scaleInput" type="range" min="0.1" max="4" value="1" step="0.01"></label>
+          <label>Rotation <input id="rotationInput" type="range" min="-180" max="180" value="0" step="1"></label>
+          <label>X <input id="xInput" type="number" value="0" step="1"></label>
+          <label>Y <input id="yInput" type="number" value="0" step="1"></label>
+        </div>
+
+        <output id="statusLine">Ready</output>
+        </div>
+      </aside>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
