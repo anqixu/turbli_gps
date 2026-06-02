@@ -3,8 +3,7 @@ const IDENTITY_TRANSFORM = { x: 0, y: 0, scale: 1, rotation: 0 };
 const state = {
   geojson: null,
   bounds: null,
-  projection: "web_mercator",
-  mode: "image",
+  mode: "view",
   imageTransform: { ...IDENTITY_TRANSFORM },
   viewTransform: loadViewTransform(),
   activeSource: null,
@@ -36,7 +35,6 @@ const el = {
   altitudeRing: document.querySelector("#altitudeRing"),
   pasteHint: document.querySelector("#pasteHint"),
   modeToggle: document.querySelector("#modeToggle"),
-  projection: document.querySelector("#projectionSelect"),
   uploadButton: document.querySelector("#uploadButton"),
   upload: document.querySelector("#uploadInput"),
   locate: document.querySelector("#locateButton"),
@@ -111,10 +109,6 @@ function setActiveTransform(next, autosave = true) {
   applyTransforms();
 }
 
-function equirectangular(lon, lat) {
-  return [lon, lat];
-}
-
 function webMercator(lon, lat) {
   const clamped = Math.max(-85.05112878, Math.min(85.05112878, lat));
   const radius = 6378137;
@@ -124,25 +118,8 @@ function webMercator(lon, lat) {
   ];
 }
 
-function usaAlbers(lon, lat) {
-  const phi1 = 29.5 * Math.PI / 180;
-  const phi2 = 45.5 * Math.PI / 180;
-  const lat0 = 37.5 * Math.PI / 180;
-  const lon0 = -96 * Math.PI / 180;
-  const phi = lat * Math.PI / 180;
-  const lam = lon * Math.PI / 180;
-  const n = 0.5 * (Math.sin(phi1) + Math.sin(phi2));
-  const c = Math.cos(phi1) ** 2 + 2 * n * Math.sin(phi1);
-  const rho = Math.sqrt(Math.max(0, c - 2 * n * Math.sin(phi))) / n;
-  const rho0 = Math.sqrt(Math.max(0, c - 2 * n * Math.sin(lat0))) / n;
-  const theta = n * (lam - lon0);
-  return [rho * Math.sin(theta), rho0 - rho * Math.cos(theta)];
-}
-
 function project(lon, lat) {
-  if (state.projection === "equirectangular") return equirectangular(lon, lat);
-  if (state.projection === "web_mercator") return webMercator(lon, lat);
-  return usaAlbers(lon, lat);
+  return webMercator(lon, lat);
 }
 
 function visitCoordinates(geometry, callback) {
@@ -328,8 +305,8 @@ function applyTransforms() {
   el.x.value = Math.round(current.x);
   el.y.value = Math.round(current.y);
   el.modeToggle.textContent = state.mode === "view" ? "↔️" : "🖼️";
-  el.modeToggle.title = state.mode === "view" ? "Move map" : "Align image";
-  el.modeToggle.setAttribute("aria-label", state.mode === "view" ? "Move map" : "Align image");
+  el.modeToggle.title = state.mode === "view" ? "Move canvas" : "Align image";
+  el.modeToggle.setAttribute("aria-label", state.mode === "view" ? "Move canvas" : "Align image");
   el.modeToggle.setAttribute("aria-pressed", state.mode === "view" ? "true" : "false");
 }
 
@@ -356,6 +333,10 @@ function setSource(source) {
   el.scrape.textContent = source.scrapeTime || "--";
   el.forecast.textContent = source.forecastTime || "--";
   el.sourceAltitude.textContent = source.altitudeText || "--";
+}
+
+function sourceUrl(source = state.activeSource) {
+  return source?.remoteUrl || source?.url || "";
 }
 
 function coordinateText(position = state.lastFix) {
@@ -398,9 +379,13 @@ function projectedAccuracyRadius(c, sx, sy) {
 async function copyCoordinates() {
   const text = coordinateText();
   if (text === "--") return;
+  await copyText(text, "Coordinates copied");
+}
+
+async function copyText(text, message) {
+  if (!text) return;
   try {
     await navigator.clipboard.writeText(text);
-    setStatus("Coordinates copied");
   } catch {
     const area = document.createElement("textarea");
     area.value = text;
@@ -410,8 +395,12 @@ async function copyCoordinates() {
     area.select();
     document.execCommand("copy");
     area.remove();
-    setStatus("Coordinates copied");
   }
+  setStatus(message);
+}
+
+async function copySourceUrl() {
+  await copyText(sourceUrl(), "Source URL copied");
 }
 
 function updatePosition(position) {
@@ -736,11 +725,7 @@ function bindEvents() {
   el.modeToggle.addEventListener("click", () => {
     state.mode = state.mode === "image" ? "view" : "image";
     applyTransforms();
-    setStatus(state.mode === "view" ? "Moving map and image together" : "Aligning image to map");
-  });
-  el.projection.addEventListener("change", () => {
-    state.projection = el.projection.value;
-    renderMap();
+    setStatus(state.mode === "view" ? "Moving canvas" : "Aligning image to canvas");
   });
   el.fit.addEventListener("click", () => {
     state.viewTransform = { ...IDENTITY_TRANSFORM };
@@ -774,6 +759,7 @@ function bindEvents() {
     applyTransforms();
   });
   fields.coord.addEventListener("click", copyCoordinates);
+  el.source.addEventListener("click", copySourceUrl);
   el.uploadButton.addEventListener("click", () => el.upload.click());
   el.upload.addEventListener("change", async () => {
     await uploadFile(el.upload.files?.[0]);

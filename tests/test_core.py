@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from turbli_gps.projections import project
 from turbli_gps.server import TurbliApp, file_sha256
 from turbli_gps.transforms import Transform
 
@@ -21,18 +20,6 @@ class TransformTests(unittest.TestCase):
         dragged = transform.compose_drag(5, -7)
         self.assertEqual(dragged.x, 15)
         self.assertEqual(dragged.y, 13)
-
-
-class ProjectionTests(unittest.TestCase):
-    def test_projection_names_return_finite_points(self) -> None:
-        for name in ("equirectangular", "web_mercator", "usa_albers"):
-            x, y = project(name, -122.4194, 37.7749)
-            self.assertIsInstance(x, float)
-            self.assertIsInstance(y, float)
-
-    def test_unknown_projection_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            project("bad", 0, 0)
 
 
 class PersistenceTests(unittest.TestCase):

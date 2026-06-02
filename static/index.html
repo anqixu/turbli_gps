@@ -26,7 +26,7 @@
       <aside id="panel" class="panel">
         <div class="panel-rail" aria-label="Map tools">
           <button id="panelHandle" class="panel-handle" type="button" aria-label="Toggle controls" title="Toggle controls">☰</button>
-          <button id="modeToggle" class="mode-toggle icon-button" type="button" aria-label="Align image" title="Align image">🖼️</button>
+          <button id="modeToggle" class="mode-toggle icon-button" type="button" aria-label="Move canvas" title="Move canvas">↔️</button>
           <button id="locateButton" class="gps-toggle icon-button" type="button" aria-label="Start GPS" title="Start GPS">🧭</button>
           <button id="fitButton" class="icon-button" type="button" aria-label="Reset map" title="Reset map">🔄</button>
           <button id="turbliFetchButton" class="icon-button" type="button" aria-label="Fetch latest Turbli image" title="Fetch latest Turbli image">☁️</button>
@@ -35,15 +35,6 @@
         </div>
         <div class="panel-content">
 
-        <div class="panel-row">
-          <label for="projectionSelect">Projection</label>
-          <select id="projectionSelect">
-            <option value="equirectangular">Equirectangular</option>
-            <option value="web_mercator" selected>Web Mercator</option>
-            <option value="usa_albers">USA Albers</option>
-          </select>
-        </div>
-
         <div class="panel-grid">
           <div class="wide"><span>Lat, Lon</span><button id="coordValue" class="copy-value" type="button" title="Copy coordinates">--</button></div>
           <div class="wide"><span>Altitude</span><strong id="altitudeValue">--</strong></div>
@@ -51,7 +42,7 @@
 
         <details class="meta">
           <summary>Image details</summary>
-          <div><span>Source</span><strong id="sourceValue">None</strong></div>
+          <div><span>Source</span><button id="sourceValue" class="copy-value" type="button" title="Copy source URL">None</button></div>
           <div><span>Scraped</span><strong id="scrapeValue">--</strong></div>
           <div><span>Forecast</span><strong id="forecastValue">--</strong></div>
           <div><span>Altitude</span><strong id="sourceAltitudeValue">--</strong></div>

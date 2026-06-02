@@ -5,7 +5,7 @@ A dependency-light local web app for aligning Turbli turbulence forecast images 
 ## Features
 
 - Browser GPS watch with copyable latitude/longitude, altitude, and accuracy display.
-- US state outline map with Web Mercator, equirectangular, and USA Albers projections.
+- US state outline map using Web Mercator.
 - Turbli image overlay with drag, scale, rotation, paste, drop, and file upload support.
 - One-click cloud fetch for the latest available Turbli US CAT map at 33,000 ft.
 - Local source and alignment persistence by image hash, source, and source family.
@@ -24,7 +24,7 @@ Open `http://127.0.0.1:8765`.
 - Cloud: fetches the latest available Turbli US CAT forecast at 33,000 ft.
 - Compass: starts or stops browser GPS tracking.
 - Reset: returns the map view to its default position.
-- Image: toggles between aligning the image and moving the map view.
+- Image: toggles between aligning the image and moving the canvas.
 - Clipboard: opens image upload; pasted or dropped images also work.
 - Hamburger: expands or collapses the control pane.
 
