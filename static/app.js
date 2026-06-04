@@ -39,6 +39,7 @@ const el = {
   upload: document.querySelector("#uploadInput"),
   locate: document.querySelector("#locateButton"),
   fit: document.querySelector("#fitButton"),
+  resetImage: document.querySelector("#resetImageButton"),
   scale: document.querySelector("#scaleInput"),
   rotation: document.querySelector("#rotationInput"),
   x: document.querySelector("#xInput"),
@@ -173,14 +174,6 @@ function mapUnitsToPixels(x, y) {
   return {
     x: x / 1000 * rect.width,
     y: y / 620 * rect.height
-  };
-}
-
-function pixelToMapUnits(x, y) {
-  const rect = el.plane.getBoundingClientRect();
-  return {
-    x: x / Math.max(1, rect.width) * 1000,
-    y: y / Math.max(1, rect.height) * 620
   };
 }
 
@@ -321,18 +314,34 @@ function chooseTransformForSource(source) {
   };
 }
 
+function isLoadableImageSource(source) {
+  return Boolean(source?.url) && !/^https?:\/\/[^/]*turbli\.com\//i.test(source.url);
+}
+
+function clearOverlay() {
+  el.overlay.removeAttribute("src");
+  el.overlay.style.display = "none";
+  state.overlayNatural = { width: 0, height: 0 };
+  el.pasteHint.hidden = false;
+}
+
 function setSource(source) {
   state.activeSource = source;
   if (!source) return;
+  el.source.textContent = source.name || source.id;
+  el.scrape.textContent = source.scrapeTime || "--";
+  el.forecast.textContent = source.forecastTime || "--";
+  el.sourceAltitude.textContent = source.altitudeText || "--";
+  if (!isLoadableImageSource(source)) {
+    clearOverlay();
+    setStatus(source.fetchNote || "Turbli image could not be loaded");
+    return;
+  }
   el.overlay.src = source.url;
   el.overlay.style.display = "block";
   el.pasteHint.hidden = true;
   state.imageTransform = chooseTransformForSource(source);
   applyTransforms();
-  el.source.textContent = source.name || source.id;
-  el.scrape.textContent = source.scrapeTime || "--";
-  el.forecast.textContent = source.forecastTime || "--";
-  el.sourceAltitude.textContent = source.altitudeText || "--";
 }
 
 function sourceUrl(source = state.activeSource) {
@@ -486,6 +495,8 @@ async function fetchTurbliSource(force = false) {
   });
   await loadState();
   setSource(source);
+  state.imageTransform = { ...IDENTITY_TRANSFORM };
+  applyTransforms();
   setStatus(source.cacheHit ? "Turbli image loaded from cache" : "Turbli image fetched and cached");
 }
 
@@ -656,7 +667,7 @@ function bindMapGestures() {
   el.map.addEventListener("drop", async event => {
     event.preventDefault();
     const file = [...event.dataTransfer.files].find(item => item.type.startsWith("image/"));
-    await uploadFile(file);
+    await uploadFile(file).catch(e => setStatus(e.message));
   });
 }
 
@@ -758,12 +769,23 @@ function bindEvents() {
     };
     applyTransforms();
   });
+  el.overlay.addEventListener("error", () => {
+    const failedUrl = sourceUrl();
+    clearOverlay();
+    setStatus(failedUrl ? `Image failed to load: ${failedUrl}` : "Image failed to load");
+  });
   fields.coord.addEventListener("click", copyCoordinates);
   el.source.addEventListener("click", copySourceUrl);
   el.uploadButton.addEventListener("click", () => el.upload.click());
   el.upload.addEventListener("change", async () => {
-    await uploadFile(el.upload.files?.[0]);
+    await uploadFile(el.upload.files?.[0]).catch(e => setStatus(e.message));
     el.upload.value = "";
+  });
+  el.resetImage.addEventListener("click", () => {
+    state.imageTransform = { ...IDENTITY_TRANSFORM };
+    applyTransforms();
+    scheduleAlignmentSave();
+    setStatus("Image position reset");
   });
   document.addEventListener("paste", async event => {
     const file = [...event.clipboardData.items]
@@ -771,7 +793,7 @@ function bindEvents() {
       ?.getAsFile();
     if (file) {
       event.preventDefault();
-      await uploadFile(file);
+      await uploadFile(file).catch(e => setStatus(e.message));
     }
   });
   el.turbliFetch.addEventListener("click", () => {

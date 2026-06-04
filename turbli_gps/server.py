@@ -20,6 +20,7 @@ from .storage import AppStorage
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
+MAX_BODY_BYTES = 50 * 1024 * 1024
 
 
 def utc_iso(epoch: float | None = None) -> str:
@@ -34,6 +35,11 @@ def file_sha256(data: bytes) -> str:
 def safe_name(name: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in name)
     return cleaned.strip("._") or "upload.bin"
+
+
+def http_error_message(exc: urllib.error.HTTPError) -> str:
+    reason = f" {exc.reason}" if getattr(exc, "reason", None) else ""
+    return f"failed to fetch Turbli image: HTTP {exc.code}{reason}"
 
 
 def compact_utc(value: datetime) -> str:
@@ -82,12 +88,16 @@ class TurbliApp:
 
     def upload_image(self, payload: dict) -> dict:
         data_url = payload.get("dataUrl", "")
+        if not data_url:
+            raise ValueError("dataUrl is required")
         name = safe_name(str(payload.get("name") or "upload.png"))
         if "," in data_url:
             _, encoded = data_url.split(",", 1)
         else:
             encoded = data_url
         raw = base64.b64decode(encoded)
+        if not raw:
+            raise ValueError("uploaded image is empty")
         digest = file_sha256(raw)
         ext = Path(name).suffix or ".png"
         out_path = self.storage.uploads_dir / f"{digest}{ext}"
@@ -137,7 +147,7 @@ class TurbliApp:
         sources = self.storage.read_sources()
         existing = sources.get("sources", {}).get(source_id)
         if existing and not force:
-            if existing["url"].startswith("https://") or (self.storage.uploads_dir / Path(existing["url"]).name).exists():
+            if (self.storage.uploads_dir / Path(existing["url"]).name).exists():
                 sources["activeSourceId"] = source_id
                 self.storage.write_sources(sources)
                 return {**existing, "cacheHit": True}
@@ -151,19 +161,7 @@ class TurbliApp:
                 content_type = response.headers.get_content_type()
                 raw = response.read()
         except urllib.error.HTTPError as exc:
-            if exc.code == 403:
-                return self.save_remote_turbli_source(
-                    source_id=source_id,
-                    filename=filename,
-                    remote_url=remote_url,
-                    date=date,
-                    run=run,
-                    hour=hour,
-                    altitude_feet=altitude_feet,
-                    region=region,
-                    reason="remote server blocked local fetch",
-                )
-            raise ValueError(f"failed to fetch Turbli image: {exc}") from exc
+            raise ValueError(http_error_message(exc)) from exc
         except urllib.error.URLError as exc:
             reason = getattr(exc, "reason", None)
             if not isinstance(reason, ssl.SSLCertVerificationError):
@@ -174,19 +172,7 @@ class TurbliApp:
                     content_type = response.headers.get_content_type()
                     raw = response.read()
             except urllib.error.HTTPError as retry_exc:
-                if retry_exc.code == 403:
-                    return self.save_remote_turbli_source(
-                        source_id=source_id,
-                        filename=filename,
-                        remote_url=remote_url,
-                        date=date,
-                        run=run,
-                        hour=hour,
-                        altitude_feet=altitude_feet,
-                        region=region,
-                        reason="remote server blocked local fetch",
-                    )
-                raise ValueError(f"failed to fetch Turbli image: {retry_exc}") from retry_exc
+                raise ValueError(http_error_message(retry_exc)) from retry_exc
         except Exception as exc:
             raise ValueError(f"failed to fetch Turbli image: {exc}") from exc
         if content_type not in {"image/jpeg", "image/jpg"}:
@@ -246,48 +232,6 @@ class TurbliApp:
         detail = errors[-1] if errors else "no candidate slots"
         raise ValueError(f"could not fetch a recent Turbli image: {detail}")
 
-    def save_remote_turbli_source(
-        self,
-        source_id: str,
-        filename: str,
-        remote_url: str,
-        date: str,
-        run: str,
-        hour: str,
-        altitude_feet: int,
-        region: str,
-        reason: str,
-    ) -> dict:
-        run_dt = datetime.strptime(f"{date}{run}", "%Y%m%d%H").replace(tzinfo=timezone.utc)
-        source = {
-            "id": source_id,
-            "family": f"turbli_direct:{region}",
-            "kind": "turbli_remote",
-            "name": filename,
-            "fileHash": file_sha256(remote_url.encode("utf-8")),
-            "url": remote_url,
-            "remoteUrl": remote_url,
-            "scrapeEpoch": time.time(),
-            "scrapeTime": utc_iso(),
-            "forecastTime": compact_utc(run_dt + timedelta(hours=int(hour))),
-            "altitudeText": f"{altitude_feet:,} ft",
-            "cacheHit": False,
-            "fetchNote": reason,
-            "turbli": {
-                "date": date,
-                "run": run,
-                "hour": hour,
-                "altitudeFeet": altitude_feet,
-                "region": region,
-                "database": f"GTG_{date}_{run}",
-            },
-        }
-        sources = self.storage.read_sources()
-        sources.setdefault("sources", {})[source_id] = source
-        sources["activeSourceId"] = source_id
-        self.storage.write_sources(sources)
-        return source
-
     def recent_turbli_slots(
         self,
         altitude_feet: int = 33000,
@@ -296,6 +240,7 @@ class TurbliApp:
     ):
         current = now or datetime.now(timezone.utc)
         start = previous_run(current)
+        cached_sources = self.storage.read_sources().get("sources", {})
         for run_index in range(0, 8):
             run_dt = start - timedelta(hours=run_index * 6)
             first_hour = next_forecast_hour(current, run_dt)
@@ -303,7 +248,7 @@ class TurbliApp:
                 date = run_dt.strftime("%Y%m%d")
                 run = f"{run_dt.hour:02d}"
                 hour = f"{forecast_hour:03d}"
-                if self.has_cached_turbli_source(date, run, hour, altitude_feet, region):
+                if self.has_cached_turbli_source(date, run, hour, altitude_feet, region, cached_sources):
                     yield date, run, hour
         for run_index in range(0, 8):
             run_dt = start - timedelta(hours=run_index * 6)
@@ -314,8 +259,17 @@ class TurbliApp:
     def turbli_source_id(self, date: str, run: str, hour: str, altitude_feet: int, region: str) -> str:
         return f"turbli_direct:GTG_{date}_{run}:{hour}:{altitude_feet}:{region}"
 
-    def has_cached_turbli_source(self, date: str, run: str, hour: str, altitude_feet: int, region: str) -> bool:
-        sources = self.storage.read_sources().get("sources", {})
+    def has_cached_turbli_source(
+        self,
+        date: str,
+        run: str,
+        hour: str,
+        altitude_feet: int,
+        region: str,
+        sources: dict | None = None,
+    ) -> bool:
+        if sources is None:
+            sources = self.storage.read_sources().get("sources", {})
         existing = sources.get(self.turbli_source_id(date, run, hour, altitude_feet, region))
         return bool(existing and (self.storage.uploads_dir / Path(existing["url"]).name).exists())
 
@@ -342,6 +296,8 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0") or 0)
         if length == 0:
             return {}
+        if length > MAX_BODY_BYTES:
+            raise ValueError(f"request body too large ({length} bytes)")
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
     def do_GET(self) -> None:
