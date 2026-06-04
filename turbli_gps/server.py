@@ -158,22 +158,25 @@ class TurbliApp:
             headers={"User-Agent": "Mozilla/5.0 TurbliGPS/0.1"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(request, timeout=10) as response:
                 content_type = response.headers.get_content_type()
                 raw = response.read()
         except urllib.error.HTTPError as exc:
             raise ValueError(http_error_message(exc)) from exc
-        except urllib.error.URLError as exc:
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
             reason = getattr(exc, "reason", None)
-            if not isinstance(reason, ssl.SSLCertVerificationError):
-                raise ValueError(f"failed to fetch Turbli image: {exc}") from exc
-            context = ssl._create_unverified_context()
-            try:
-                with urllib.request.urlopen(request, timeout=30, context=context) as response:
-                    content_type = response.headers.get_content_type()
-                    raw = response.read()
-            except urllib.error.HTTPError as retry_exc:
-                raise ValueError(http_error_message(retry_exc)) from retry_exc
+            if isinstance(reason, ssl.SSLCertVerificationError):
+                context = ssl._create_unverified_context()
+                try:
+                    with urllib.request.urlopen(request, timeout=10, context=context) as response:
+                        content_type = response.headers.get_content_type()
+                        raw = response.read()
+                except urllib.error.HTTPError as retry_exc:
+                    raise ValueError(http_error_message(retry_exc)) from retry_exc
+                except Exception as retry_exc:
+                    raise ValueError(f"offline or network error: {retry_exc}") from retry_exc
+            else:
+                raise ValueError(f"offline or network error: {exc}") from exc
         except Exception as exc:
             raise ValueError(f"failed to fetch Turbli image: {exc}") from exc
         if content_type not in {"image/jpeg", "image/jpg"}:

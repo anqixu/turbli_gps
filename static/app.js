@@ -334,13 +334,20 @@ function clearOverlay() {
   el.pasteHint.hidden = false;
 }
 
-function setSource(source) {
+async function setSource(source) {
   state.activeSource = source;
   if (!source) return;
   el.source.textContent = source.name || source.id;
   el.scrape.textContent = source.scrapeTime || "--";
   el.forecast.textContent = source.forecastTime || "--";
   el.sourceAltitude.textContent = source.altitudeText || "--";
+
+  if (source.turbli?.region && source.turbli.region !== el.region.value) {
+    el.region.value = source.turbli.region;
+    await loadMapData(source.turbli.region);
+    renderMap();
+  }
+
   if (!isLoadableImageSource(source)) {
     clearOverlay();
     setStatus(source.fetchNote || "Turbli image could not be loaded");
@@ -504,7 +511,7 @@ async function fetchTurbliSource(force = false) {
     body: JSON.stringify(payload)
   });
   await loadState();
-  setSource(source);
+  await setSource(source);
   state.imageTransform = { ...IDENTITY_TRANSFORM };
   applyTransforms();
   setStatus(source.cacheHit ? "Turbli image loaded from cache" : "Turbli image fetched and cached");
@@ -514,7 +521,7 @@ async function loadState() {
   state.serverState = await api("/api/state");
   const sources = state.serverState.sources?.sources || {};
   const activeId = state.serverState.sources?.activeSourceId;
-  if (activeId && sources[activeId]) setSource(sources[activeId]);
+  if (activeId && sources[activeId]) await setSource(sources[activeId]);
 }
 
 function readFileAsDataUrl(file) {
@@ -535,7 +542,7 @@ async function uploadFile(file) {
     body: JSON.stringify({ name: file.name || "pasted-image.png", dataUrl })
   });
   await loadState();
-  setSource(source);
+  await setSource(source);
   setStatus("Image ready. Alignment autosaves.");
 }
 
@@ -820,6 +827,12 @@ function bindEvents() {
   el.turbliFetch.addEventListener("click", () => {
     fetchTurbliSource().catch(error => setStatus(error.message));
   });
+  el.region.addEventListener("change", async () => {
+    setStatus(`Switching map to ${el.region.value}...`);
+    await loadMapData(el.region.value);
+    renderMap();
+    setStatus(`Map switched to ${el.region.value}`);
+  });
   el.altitudeFetchSelect.addEventListener("change", () => {
     if (el.altitudeFetchSelect.value) el.altitudeFetch.value = el.altitudeFetchSelect.value;
   });
@@ -861,9 +874,16 @@ function bindEvents() {
   }
 }
 
+async function loadMapData(region) {
+  let file = "us-states.geojson";
+  if (region === "world") file = "world.geojson";
+  if (region === "europe") file = "europe.geojson";
+  state.geojson = await fetch(`/data/${file}`).then(res => res.json());
+}
+
 async function start() {
   bindEvents();
-  state.geojson = await fetch("/data/us-states.geojson").then(res => res.json());
+  await loadMapData(el.region.value);
   await loadState();
   renderMap();
   setStatus("Ready");
