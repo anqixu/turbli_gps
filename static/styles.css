@@ -109,7 +109,7 @@ input[type="text"] {
 .state {
   fill: #202a31;
   stroke: #80909b;
-  stroke-width: 0.75;
+  stroke-width: var(--wireframe-thickness, 0.75px);
   vector-effect: non-scaling-stroke;
 }
 
@@ -357,7 +357,7 @@ summary {
 
 .controls label {
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
+  grid-template-columns: 68px minmax(0, 1fr);
   gap: 6px;
   align-items: center;
 }
@@ -444,7 +444,7 @@ summary {
   }
 
   .controls label {
-    grid-template-columns: 52px minmax(0, 1fr);
+    grid-template-columns: 68px minmax(0, 1fr);
   }
 }
 

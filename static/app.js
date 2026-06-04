@@ -49,7 +49,10 @@ const el = {
   scrape: document.querySelector("#scrapeValue"),
   forecast: document.querySelector("#forecastValue"),
   sourceAltitude: document.querySelector("#sourceAltitudeValue"),
-  turbliFetch: document.querySelector("#turbliFetchButton")
+  turbliFetch: document.querySelector("#turbliFetchButton"),
+  region: document.querySelector("#regionSelect"),
+  opacity: document.querySelector("#opacityInput"),
+  wireframe: document.querySelector("#wireframeInput")
 };
 
 const fields = {
@@ -485,7 +488,7 @@ async function fetchTurbliSource(force = false) {
   const payload = {
     latest: true,
     altitudeFeet: 33000,
-    region: "us",
+    region: el.region.value || "us",
     force
   };
   setStatus("Fetching latest Turbli image...");
@@ -577,12 +580,12 @@ function beginGesture(event) {
       distance: gestureDistance(points),
       angle: gestureAngle(points)
     };
-  } else {
+  } else if (points.length === 1) {
     state.gesture = {
       kind: event.button === 2 ? "rotate" : "drag",
       transform,
-      x: event.clientX,
-      y: event.clientY
+      x: points[0].x,
+      y: points[0].y
     };
   }
 }
@@ -799,6 +802,17 @@ function bindEvents() {
   el.turbliFetch.addEventListener("click", () => {
     fetchTurbliSource().catch(error => setStatus(error.message));
   });
+  el.opacity.addEventListener("input", () => {
+    el.overlay.style.opacity = el.opacity.value;
+  });
+  el.wireframe.addEventListener("input", () => {
+    document.documentElement.style.setProperty("--wireframe-thickness", `${el.wireframe.value}px`);
+  });
+  
+  // Set initial values
+  el.overlay.style.opacity = el.opacity.value;
+  document.documentElement.style.setProperty("--wireframe-thickness", `${el.wireframe.value}px`);
+
   for (const input of [el.scale, el.rotation, el.x, el.y]) {
     input.addEventListener("input", () => {
       setActiveTransform({
