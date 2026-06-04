@@ -35,10 +35,61 @@
         </div>
         <div class="panel-content">
 
-        <div class="panel-grid">
-          <div class="wide"><span>Lat, Lon</span><button id="coordValue" class="copy-value" type="button" title="Copy coordinates">--</button></div>
-          <div class="wide"><span>Altitude</span><strong id="altitudeValue">--</strong></div>
-        </div>
+        <fieldset>
+          <legend>GPS</legend>
+          <div class="panel-grid">
+            <div class="wide"><span>Lat, Lon</span><button id="coordValue" class="copy-value" type="button" title="Copy coordinates">--</button></div>
+            <div class="wide"><span>Altitude</span><strong id="altitudeValue">--</strong></div>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Turbli Source</legend>
+          <div class="controls">
+            <label>Region
+              <select id="regionSelect">
+                <option value="us">United States</option>
+                <option value="europe">Europe</option>
+                <option value="world">World</option>
+              </select>
+            </label>
+            <label>Altitude
+              <div class="input-group">
+                <input id="altitudeFetchInput" type="number" value="33000" step="3000">
+                <select id="altitudeFetchSelect">
+                  <option value="">--</option>
+                  <option value="3000">3k</option>
+                  <option value="9000">9k</option>
+                  <option value="15000">15k</option>
+                  <option value="21000">21k</option>
+                  <option value="27000">27k</option>
+                  <option value="30000">30k</option>
+                  <option value="33000">33k</option>
+                  <option value="36000">36k</option>
+                  <option value="39000">39k</option>
+                  <option value="42000">42k</option>
+                  <option value="45000">45k</option>
+                </select>
+              </div>
+            </label>
+            <label>Forecast
+              <div class="input-group">
+                <input id="forecastHourFetchInput" type="number" placeholder="Latest" step="3">
+                <select id="forecastHourFetchSelect">
+                  <option value="">--</option>
+                  <option value="3">3h</option>
+                  <option value="6">6h</option>
+                  <option value="9">9h</option>
+                  <option value="12">12h</option>
+                  <option value="18">18h</option>
+                  <option value="24">24h</option>
+                  <option value="36">36h</option>
+                  <option value="48">48h</option>
+                </select>
+              </div>
+            </label>
+          </div>
+        </fieldset>
 
         <details class="meta">
           <summary>Image details</summary>
@@ -48,22 +99,24 @@
           <div><span>Altitude</span><strong id="sourceAltitudeValue">--</strong></div>
         </details>
 
-        <div class="controls">
-          <label>Region
-            <select id="regionSelect">
-              <option value="us">United States</option>
-              <option value="europe">Europe</option>
-              <option value="world">World</option>
-            </select>
-          </label>
-          <label>Opacity <input id="opacityInput" type="range" min="0" max="1" value="0.72" step="0.01"></label>
-          <label>Wireframe <input id="wireframeInput" type="range" min="0" max="3" value="0.75" step="0.05"></label>
-          <label>Scale <input id="scaleInput" type="range" min="0.1" max="4" value="1" step="0.01"></label>
-          <label>Rotation <input id="rotationInput" type="range" min="-180" max="180" value="0" step="1"></label>
-          <label>X <input id="xInput" type="number" value="0" step="1"></label>
-          <label>Y <input id="yInput" type="number" value="0" step="1"></label>
-          <button id="resetImageButton" type="button" title="Reset image position and scale">↩ Reset image</button>
-        </div>
+        <fieldset>
+          <legend>View</legend>
+          <div class="controls">
+            <label>Opacity <input id="opacityInput" type="range" min="0" max="1" value="0.72" step="0.01"></label>
+            <label>Wireframe <input id="wireframeInput" type="range" min="0" max="3" value="0.75" step="0.05"></label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Transform</legend>
+          <div class="controls">
+            <label>Scale <input id="scaleInput" type="range" min="0.1" max="4" value="1" step="0.01"></label>
+            <label>Rotation <input id="rotationInput" type="range" min="-180" max="180" value="0" step="1"></label>
+            <label>X <input id="xInput" type="number" value="0" step="1"></label>
+            <label>Y <input id="yInput" type="number" value="0" step="1"></label>
+            <button id="resetImageButton" type="button" title="Reset image position and scale">↩ Reset image</button>
+          </div>
+        </fieldset>
 
         <output id="statusLine">Ready</output>
         </div>

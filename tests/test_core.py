@@ -16,7 +16,7 @@ from turbli_gps.server import (
     next_forecast_hour,
     previous_run,
     safe_name,
-    utc_iso,
+    local_iso,
 )
 from turbli_gps.storage import JsonStore
 from turbli_gps.transforms import Transform
@@ -61,9 +61,9 @@ class UtilTests(unittest.TestCase):
         self.assertEqual(digest, file_sha256(b"hello"))
         self.assertNotEqual(digest, file_sha256(b"world"))
 
-    def test_utc_iso_returns_iso_string(self):
-        result = utc_iso(0.0)
-        self.assertIn("1970", result)
+    def test_local_iso_returns_iso_string(self):
+        result = local_iso(1770000000.0)
+        self.assertIn("2026", result)
         self.assertIn("T", result)
 
     def test_compact_utc_replaces_offset(self):
@@ -432,6 +432,18 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(source["forecastTime"], "2026-06-02T18:00:00Z")
             cached = app.fetch_turbli_image({"latest": True}, now=now)
             self.assertTrue(cached["cacheHit"])
+
+    def test_latest_turbli_fetch_with_target_hour(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = TurbliApp(Path(tmp))
+            now = datetime(2026, 6, 2, 15, 32, tzinfo=timezone.utc)
+            with patch("urllib.request.urlopen", return_value=_fake_jpeg_response()) as mocked:
+                source = app.fetch_turbli_image({"latest": True, "hour": "009"}, now=now)
+            first_request = mocked.call_args_list[0].args[0]
+            self.assertEqual(
+                first_request.full_url,
+                "https://turbli.com/databases/GTG_20260602_12/figures/CAT_009_33000_us.jpg",
+            )
 
     def test_latest_turbli_fetch_raises_when_all_slots_fail(self):
         with tempfile.TemporaryDirectory() as tmp:

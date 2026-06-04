@@ -1,4 +1,6 @@
 const IDENTITY_TRANSFORM = { x: 0, y: 0, scale: 1, rotation: 0 };
+const IS_ANDROID = /Android/i.test(navigator.userAgent);
+const SENSITIVITY = IS_ANDROID ? 0.7 : 1.0;
 
 const state = {
   geojson: null,
@@ -51,6 +53,10 @@ const el = {
   sourceAltitude: document.querySelector("#sourceAltitudeValue"),
   turbliFetch: document.querySelector("#turbliFetchButton"),
   region: document.querySelector("#regionSelect"),
+  altitudeFetch: document.querySelector("#altitudeFetchInput"),
+  altitudeFetchSelect: document.querySelector("#altitudeFetchSelect"),
+  forecastFetch: document.querySelector("#forecastHourFetchInput"),
+  forecastFetchSelect: document.querySelector("#forecastHourFetchSelect"),
   opacity: document.querySelector("#opacityInput"),
   wireframe: document.querySelector("#wireframeInput")
 };
@@ -301,8 +307,8 @@ function applyTransforms() {
   el.x.value = Math.round(current.x);
   el.y.value = Math.round(current.y);
   el.modeToggle.textContent = state.mode === "view" ? "↔️" : "🖼️";
-  el.modeToggle.title = state.mode === "view" ? "Move canvas" : "Align image";
-  el.modeToggle.setAttribute("aria-label", state.mode === "view" ? "Move canvas" : "Align image");
+  el.modeToggle.title = state.mode === "view" ? "Move Wireframe Map" : "Move Image";
+  el.modeToggle.setAttribute("aria-label", state.mode === "view" ? "Move Wireframe Map" : "Move Image");
   el.modeToggle.setAttribute("aria-pressed", state.mode === "view" ? "true" : "false");
 }
 
@@ -487,7 +493,8 @@ async function api(path, options = {}) {
 async function fetchTurbliSource(force = false) {
   const payload = {
     latest: true,
-    altitudeFeet: 33000,
+    altitudeFeet: parseInt(el.altitudeFetch.value) || 33000,
+    hour: el.forecastFetch.value || "",
     region: el.region.value || "us",
     force
   };
@@ -598,14 +605,16 @@ function updateGesture(event) {
       x: (points[0].x + points[1].x) / 2,
       y: (points[0].y + points[1].y) / 2
     };
+    const deltaX = (center.x - state.gesture.center.x) * SENSITIVITY;
+    const deltaY = (center.y - state.gesture.center.y) * SENSITIVITY;
     const delta = state.mode === "image"
-      ? pixelsToMapUnits(center.x - state.gesture.center.x, center.y - state.gesture.center.y)
-      : { x: center.x - state.gesture.center.x, y: center.y - state.gesture.center.y };
+      ? pixelsToMapUnits(deltaX, deltaY)
+      : { x: deltaX, y: deltaY };
     const next = {
       x: state.gesture.transform.x + delta.x,
       y: state.gesture.transform.y + delta.y,
       scale: state.gesture.transform.scale * (gestureDistance(points) / state.gesture.distance),
-      rotation: state.gesture.transform.rotation + gestureAngle(points) - state.gesture.angle
+      rotation: state.gesture.transform.rotation + (gestureAngle(points) - state.gesture.angle) * SENSITIVITY
     };
     setActiveTransform(next);
     return;
@@ -613,13 +622,15 @@ function updateGesture(event) {
   if (state.gesture.kind === "rotate") {
     setActiveTransform({
       ...state.gesture.transform,
-      rotation: state.gesture.transform.rotation + (event.clientX - state.gesture.x) * 0.35
+      rotation: state.gesture.transform.rotation + (event.clientX - state.gesture.x) * 0.35 * SENSITIVITY
     });
     return;
   }
+  const deltaX = (event.clientX - state.gesture.x) * SENSITIVITY;
+  const deltaY = (event.clientY - state.gesture.y) * SENSITIVITY;
   const delta = state.mode === "image"
-    ? pixelsToMapUnits(event.clientX - state.gesture.x, event.clientY - state.gesture.y)
-    : { x: event.clientX - state.gesture.x, y: event.clientY - state.gesture.y };
+    ? pixelsToMapUnits(deltaX, deltaY)
+    : { x: deltaX, y: deltaY };
   setActiveTransform({
     ...state.gesture.transform,
     x: state.gesture.transform.x + delta.x,
@@ -739,7 +750,7 @@ function bindEvents() {
   el.modeToggle.addEventListener("click", () => {
     state.mode = state.mode === "image" ? "view" : "image";
     applyTransforms();
-    setStatus(state.mode === "view" ? "Moving canvas" : "Aligning image to canvas");
+    setStatus(state.mode === "view" ? "Move Wireframe Map mode" : "Move Image mode");
   });
   el.fit.addEventListener("click", () => {
     state.viewTransform = { ...IDENTITY_TRANSFORM };
@@ -752,6 +763,13 @@ function bindEvents() {
       setStatus("Browser geolocation is unavailable");
       return;
     }
+
+    if (state.mode === "image") {
+      state.mode = "view";
+      applyTransforms();
+      setStatus("Switched to Move Wireframe Map mode");
+    }
+
     if (state.watchId != null) {
       stopGpsWatch();
       return;
@@ -801,6 +819,12 @@ function bindEvents() {
   });
   el.turbliFetch.addEventListener("click", () => {
     fetchTurbliSource().catch(error => setStatus(error.message));
+  });
+  el.altitudeFetchSelect.addEventListener("change", () => {
+    if (el.altitudeFetchSelect.value) el.altitudeFetch.value = el.altitudeFetchSelect.value;
+  });
+  el.forecastFetchSelect.addEventListener("change", () => {
+    el.forecastFetch.value = el.forecastFetchSelect.value;
   });
   el.opacity.addEventListener("input", () => {
     el.overlay.style.opacity = el.opacity.value;

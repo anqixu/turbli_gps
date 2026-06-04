@@ -23,9 +23,9 @@ STATIC = ROOT / "static"
 MAX_BODY_BYTES = 50 * 1024 * 1024
 
 
-def utc_iso(epoch: float | None = None) -> str:
+def local_iso(epoch: float | None = None) -> str:
     value = time.time() if epoch is None else epoch
-    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(value).astimezone().isoformat()
 
 
 def file_sha256(data: bytes) -> str:
@@ -109,7 +109,7 @@ class TurbliApp:
             "name": name,
             "fileHash": digest,
             "url": f"/uploads/{out_path.name}",
-            "createdAt": utc_iso(),
+            "createdAt": local_iso(),
         }
         sources = self.storage.read_sources()
         sources.setdefault("sources", {})[source["id"]] = source
@@ -128,7 +128,8 @@ class TurbliApp:
             raise ValueError("altitudeFeet must be an integer")
         force = bool(payload.get("force"))
         if payload.get("latest"):
-            return self.fetch_latest_turbli_image(altitude_feet, region, force, now)
+            target_hour = int(payload.get("hour")) if payload.get("hour") else None
+            return self.fetch_latest_turbli_image(altitude_feet, region, force, now, target_hour)
         if not re.fullmatch(r"\d{8}", date):
             raise ValueError("date must be YYYYMMDD")
         if run not in {"00", "06", "12", "18"}:
@@ -191,7 +192,7 @@ class TurbliApp:
             "url": f"/uploads/{out_path.name}",
             "remoteUrl": remote_url,
             "scrapeEpoch": time.time(),
-            "scrapeTime": utc_iso(),
+            "scrapeTime": local_iso(),
             "forecastTime": compact_utc(forecast_dt),
             "altitudeText": f"{altitude_feet:,} ft",
             "cacheHit": False,
@@ -215,9 +216,10 @@ class TurbliApp:
         region: str,
         force: bool = False,
         now: datetime | None = None,
+        target_hour: int | None = None,
     ) -> dict:
         errors = []
-        for date, run, hour in self.recent_turbli_slots(altitude_feet, region, now):
+        for date, run, hour in self.recent_turbli_slots(altitude_feet, region, now, target_hour):
             try:
                 return self.fetch_turbli_image({
                     "date": date,
@@ -237,6 +239,7 @@ class TurbliApp:
         altitude_feet: int = 33000,
         region: str = "us",
         now: datetime | None = None,
+        target_hour: int | None = None,
     ):
         current = now or datetime.now(timezone.utc)
         start = previous_run(current)
@@ -244,7 +247,9 @@ class TurbliApp:
         for run_index in range(0, 8):
             run_dt = start - timedelta(hours=run_index * 6)
             first_hour = next_forecast_hour(current, run_dt)
-            for forecast_hour in range(first_hour, 49, 3):
+            hours = [target_hour] if target_hour is not None else range(first_hour, 49, 3)
+            for forecast_hour in hours:
+                if forecast_hour < 0: continue
                 date = run_dt.strftime("%Y%m%d")
                 run = f"{run_dt.hour:02d}"
                 hour = f"{forecast_hour:03d}"
@@ -253,7 +258,9 @@ class TurbliApp:
         for run_index in range(0, 8):
             run_dt = start - timedelta(hours=run_index * 6)
             first_hour = next_forecast_hour(current, run_dt)
-            for forecast_hour in range(first_hour, 49, 3):
+            hours = [target_hour] if target_hour is not None else range(first_hour, 49, 3)
+            for forecast_hour in hours:
+                if forecast_hour < 0: continue
                 yield run_dt.strftime("%Y%m%d"), f"{run_dt.hour:02d}", f"{forecast_hour:03d}"
 
     def turbli_source_id(self, date: str, run: str, hour: str, altitude_feet: int, region: str) -> str:
