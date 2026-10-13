@@ -7,7 +7,7 @@ A dependency-light local web app for aligning Turbli turbulence forecast images 
 - Browser GPS watch with copyable latitude/longitude, altitude, and accuracy display.
 - US state outline map using Web Mercator.
 - Turbli image overlay with drag, scale, rotation, paste, drop, and file upload support.
-- One-click cloud fetch for the latest available Turbli US CAT map at 33,000 ft.
+- One-click cloud fetch of the current Turbli clear-air turbulence (CAT) map for the chosen region, altitude, and lead time.
 - Local source and alignment persistence by image hash, source, and source family.
 - No external Python packages required for the core server or browser client.
 
@@ -53,20 +53,32 @@ sequenceDiagram
     participant Turbli
     
     User->>Browser: Click Cloud Fetch Button
-    Browser->>Server: POST /api/turbli/fetch {latest: true}
-    Server->>Server: Compute recent forecast slots
+    Browser->>Server: POST /api/turbli/fetch {latest, region, altitudeFeet, leadHours}
+    Server->>Turbli: GET /maps/<region>-turbulence-map/ (cached 10 min)
+    Turbli-->>Server: Current run and frame list
     Server->>Server: Check local sources.json cache
     alt Cache Hit
         Server-->>Browser: Return cached image metadata & local URL
     else Cache Miss
-        Server->>Turbli: GET remote image (with retries/SSL fallback)
+        Server->>Turbli: GET remote image
         Turbli-->>Server: JPEG Image Bytes
         Server->>Server: Compute SHA256 & save to data/uploads/
         Server->>Server: Update sources.json
         Server-->>Browser: Return new image metadata & local URL
     end
-    Browser->>Browser: Load image and apply Identity Transform
+    Browser->>Browser: Load image and apply its saved alignment
 ```
+
+### Turbli runs
+
+Turbli serves its maps from `/databases/GTG_<date>_<HH>/figures/CAT_<hour>_<altitude>_<region>.jpg`.
+The following facts about that layout drive the fetch logic:
+
+- Only the current run exists. Older runs return the origin's own HTTP 403 page, which is not a bot block.
+- A run labelled `HH` is published about two hours before `HH:00Z`, and turbli.com labels its `CAT_006` frame "Now". The app therefore dates `CAT_<hour>` at `HH:00Z - 6 h + hour`.
+- Frames run from `CAT_006` to `CAT_036` every 3 hours, at 15,000, 20,000, 25,000, 30,000, 33,000, 36,000 and 39,000 ft.
+- The map page names the current run, so a fetch normally costs one page request and one image request. When the page is unavailable, the server tries at most three run labels, newest first.
+- Cloudflare rejects requests without a browser-like `User-Agent` (error 1010) and blocks hotlinking from other origins, so images are fetched by the server rather than by the browser. If Cloudflare blocks the server, the error says so; paste the image from turbli.com instead.
 
 ## Installation
 
@@ -98,7 +110,7 @@ Open `http://127.0.0.1:8765` in your browser.
 
 ## Controls
 
-- **Cloud:** fetches the latest available Turbli US CAT forecast at 33,000 ft.
+- **Cloud:** fetches the Turbli CAT map for the selected region, altitude, and forecast lead time ("Now" to +24 h).
 - **Compass:** starts or stops browser GPS tracking.
 - **Reset:** returns the map view to its default position.
 - **Image:** toggles between aligning the image and moving the canvas.

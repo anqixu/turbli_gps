@@ -11,25 +11,25 @@ from unittest.mock import patch
 
 from turbli_gps.server import (
     TurbliApp,
+    TurbliFrame,
     compact_utc,
     file_sha256,
-    next_forecast_hour,
+    guessed_frames,
+    local_iso,
+    parse_map_page,
     previous_run,
     safe_name,
-    local_iso,
 )
 from turbli_gps.storage import JsonStore
-from turbli_gps.transforms import Transform
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _fake_jpeg_response(data: bytes = b"jpeg"):
+def _fake_jpeg_response(data: bytes = b"jpeg", content_type: str = "image/jpeg"):
     class FakeHeaders:
         def get_content_type(self) -> str:
-            return "image/jpeg"
+            return content_type
 
     class FakeResponse:
         headers = FakeHeaders()
@@ -48,6 +48,62 @@ def _fake_jpeg_response(data: bytes = b"jpeg"):
 
 def _make_data_url(raw: bytes) -> str:
     return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+
+
+def _http_error(code: int, body: bytes = b"", headers: dict | None = None) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(url="x", code=code, msg="err", hdrs=headers or {}, fp=io.BytesIO(body))
+
+
+DIRECT = {"date": "20260602", "run": "00", "hour": "006", "altitudeFeet": 33000, "region": "us"}
+
+
+def _router(routes: dict):
+    """Fake urlopen: first route whose key is in the URL wins; anything else is a JPEG."""
+
+    def fake_urlopen(request, *args, **kwargs):
+        for fragment, response in routes.items():
+            if fragment in request.full_url:
+                if isinstance(response, Exception):
+                    raise response
+                return response
+        return _fake_jpeg_response()
+
+    return fake_urlopen
+
+
+DIRECT = {"date": "20260602", "run": "00", "hour": "006", "altitudeFeet": 33000, "region": "us"}
+ORIGIN_403 = b"<title>Error 403 - turbli</title>"
+CLOUDFLARE_403 = b"<title>Attention Required! | Cloudflare</title> error code: 1010"
+
+
+def _router(routes: dict):
+    """Fake urlopen: the first route whose key is in the URL answers, otherwise a JPEG.
+
+    Route values are factories so each call gets a fresh response or exception.
+    """
+
+    def fake_urlopen(request, *args, **kwargs):
+        for fragment, make in routes.items():
+            if fragment in request.full_url:
+                response = make()
+                if isinstance(response, Exception):
+                    raise response
+                return response
+        return _fake_jpeg_response()
+
+    return fake_urlopen
+
+
+# Trimmed copy of the frame list on https://turbli.com/maps/us-turbulence-map/:
+# the page repeats the list inside its own substring() call.
+_FRAMES = "['/databases/GTG_20261013_06/figures/CAT_006', '/databases/GTG_20261013_06/figures/CAT_009']"
+MAP_PAGE = f"""
+<script type="text/javascript">
+    var imagesPathGTG = ("{_FRAMES}").substring(1, ("{_FRAMES}").length - 1).split(",");
+    var hours = ("[0, 3]").replace(/ /g,'').replace("[",'').replace("]",'').split(",");
+    var altitudes_ft = ("[39000, 36000, 33000, 30000, 25000, 20000, 15000]").replace(/ /g,'');
+</script>
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -88,80 +144,33 @@ class UtilTests(unittest.TestCase):
         run = previous_run(now)
         self.assertEqual(run.hour, 18)
 
-    def test_next_forecast_hour_minimum_6(self):
-        run_dt = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
-        now = datetime(2026, 6, 2, 12, 30, tzinfo=timezone.utc)
-        self.assertEqual(next_forecast_hour(now, run_dt), 6)
+    def test_frame_valid_time_counts_from_six_hours_before_run_label(self):
+        # Turbli publishes GTG_..._06 around 04:15Z and labels its CAT_006 frame "Now".
+        frame = TurbliFrame("20261013", "06", "009")
+        self.assertEqual(compact_utc(frame.valid_time), "2026-10-13T09:00:00Z")
+        self.assertEqual(frame.database, "GTG_20261013_06")
 
-    def test_next_forecast_hour_rounds_up_to_3h(self):
-        run_dt = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
-        now = datetime(2026, 6, 2, 14, 0, tzinfo=timezone.utc)
-        # elapsed = 2h → rounds up to next 3h = 3, but minimum is 6
-        self.assertEqual(next_forecast_hour(now, run_dt), 6)
+    def test_parse_map_page(self):
+        catalog = parse_map_page(MAP_PAGE)
+        self.assertEqual(
+            catalog.frames,
+            [TurbliFrame("20261013", "06", "006"), TurbliFrame("20261013", "06", "009")],
+        )
+        self.assertIn(25000, catalog.altitudes_ft)
+        self.assertIsNone(parse_map_page("<html>no frames</html>"))
 
-    def test_next_forecast_hour_capped_at_48(self):
-        run_dt = datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc)
-        now = datetime(2026, 6, 3, 0, 0, tzinfo=timezone.utc)
-        self.assertEqual(next_forecast_hour(now, run_dt), 48)
-
-    def test_next_forecast_hour_mid_range(self):
-        run_dt = datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)
-        now = datetime(2026, 6, 2, 13, 0, tzinfo=timezone.utc)
-        # elapsed = 13h → ceil to next 3h multiple = 15
-        self.assertEqual(next_forecast_hour(now, run_dt), 15)
-
-
-# ---------------------------------------------------------------------------
-# Transform tests
-# ---------------------------------------------------------------------------
-
-class TransformTests(unittest.TestCase):
-    def test_transform_rotation_scale_and_drag(self) -> None:
-        transform = Transform(x=10, y=20, scale=2, rotation=90)
-        x, y = transform.apply(3, 0)
-        self.assertAlmostEqual(x, 10)
-        self.assertAlmostEqual(y, 26)
-        dragged = transform.compose_drag(5, -7)
-        self.assertEqual(dragged.x, 15)
-        self.assertEqual(dragged.y, 13)
-
-    def test_from_dict_defaults(self):
-        t = Transform.from_dict({})
-        self.assertEqual(t.x, 0.0)
-        self.assertEqual(t.y, 0.0)
-        self.assertEqual(t.scale, 1.0)
-        self.assertEqual(t.rotation, 0.0)
-
-    def test_from_dict_values(self):
-        t = Transform.from_dict({"x": 5, "y": -3, "scale": 2.5, "rotation": 45})
-        self.assertEqual(t.x, 5.0)
-        self.assertEqual(t.y, -3.0)
-        self.assertEqual(t.scale, 2.5)
-        self.assertEqual(t.rotation, 45.0)
-
-    def test_from_dict_clamps_negative_scale(self):
-        t = Transform.from_dict({"scale": -1})
-        self.assertEqual(t.scale, 0.01)
-
-    def test_from_dict_clamps_zero_scale(self):
-        t = Transform.from_dict({"scale": 0})
-        self.assertEqual(t.scale, 0.01)
-
-    def test_as_dict_roundtrip(self):
-        t = Transform(x=1.5, y=-2.0, scale=3.0, rotation=90.0)
-        self.assertEqual(t, Transform.from_dict(t.as_dict()))
-
-    def test_apply_identity(self):
-        t = Transform()
-        self.assertAlmostEqual(t.apply(3, 4)[0], 3)
-        self.assertAlmostEqual(t.apply(3, 4)[1], 4)
-
-    def test_compose_drag_immutable(self):
-        original = Transform(x=0, y=0, scale=1, rotation=0)
-        dragged = original.compose_drag(10, 20)
-        self.assertEqual(original.x, 0)
-        self.assertEqual(dragged.x, 10)
-        self.assertEqual(dragged.y, 20)
+    def test_guessed_frames_start_with_the_next_run_label(self):
+        # 05:00Z: the 06 label is usually already out and the 00 label already purged.
+        now = datetime(2026, 10, 13, 5, 0, tzinfo=timezone.utc)
+        self.assertEqual(
+            list(guessed_frames(now, lead_hours=0)),
+            [
+                TurbliFrame("20261013", "06", "006"),
+                TurbliFrame("20261013", "00", "009"),
+                TurbliFrame("20261012", "18", "015"),
+            ],
+        )
+        self.assertEqual(next(guessed_frames(now, lead_hours=9)).hour, "015")
 
 
 # ---------------------------------------------------------------------------
@@ -230,8 +239,10 @@ class PersistenceTests(unittest.TestCase):
             app = TurbliApp(Path(tmp))
             raw = b"fake-png-bytes"
             encoded = base64.b64encode(raw).decode("ascii")
-            source = app.upload_image({"name": "x.png", "dataUrl": encoded})
+            source = app.upload_image({"name": "x.html", "dataUrl": encoded})
             self.assertEqual(source["fileHash"], file_sha256(raw))
+            # Uploads are served from our origin, so only image extensions are kept.
+            self.assertTrue(source["url"].endswith(".png"))
 
     def test_upload_empty_body_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -267,118 +278,52 @@ class PersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app = TurbliApp(Path(tmp))
             with patch("urllib.request.urlopen", return_value=_fake_jpeg_response()) as mocked:
-                source = app.fetch_turbli_image({
-                    "date": "20260602",
-                    "run": "00",
-                    "hour": "006",
-                    "altitudeFeet": 33000,
-                    "region": "us",
-                })
-            request = mocked.call_args.args[0]
+                source = app.fetch_turbli_image(DIRECT)
+                cached = app.fetch_turbli_image(DIRECT)
+            self.assertEqual(mocked.call_count, 1)
             self.assertEqual(
-                request.full_url,
+                mocked.call_args.args[0].full_url,
                 "https://turbli.com/databases/GTG_20260602_00/figures/CAT_006_33000_us.jpg",
             )
-            self.assertEqual(source["forecastTime"], "2026-06-02T06:00:00Z")
+            self.assertEqual(source["forecastTime"], "2026-06-02T00:00:00Z")
             self.assertEqual(source["altitudeText"], "33,000 ft")
-            cached = app.fetch_turbli_image({
-                "date": "20260602",
-                "run": "00",
-                "hour": "006",
-                "altitudeFeet": 33000,
-                "region": "us",
-            })
             self.assertTrue(cached["cacheHit"])
+            self.assertTrue(app.has_cached_turbli_source(TurbliFrame("20260602", "00", "006"), 33000, "us"))
 
-    def test_fetch_turbli_invalid_date(self):
+    def test_fetch_turbli_rejects_invalid_parameters(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = TurbliApp(Path(tmp))
-            with self.assertRaises(ValueError, msg="date must be YYYYMMDD"):
-                app.fetch_turbli_image({"date": "2026-06-02", "run": "00", "hour": "006", "altitudeFeet": 33000, "region": "us"})
+            for override in (
+                {"date": "2026-06-02"},
+                {"run": "03"},
+                {"hour": "007"},
+                {"altitudeFeet": 33500},
+                {"region": "us/eu"},
+                {"region": "asia"},
+            ):
+                with self.subTest(override=override), self.assertRaises(ValueError):
+                    app.fetch_turbli_image({**DIRECT, **override})
 
-    def test_fetch_turbli_invalid_run(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            app = TurbliApp(Path(tmp))
-            with self.assertRaises(ValueError):
-                app.fetch_turbli_image({"date": "20260602", "run": "03", "hour": "006", "altitudeFeet": 33000, "region": "us"})
-
-    def test_fetch_turbli_invalid_hour(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            app = TurbliApp(Path(tmp))
-            with self.assertRaises(ValueError):
-                app.fetch_turbli_image({"date": "20260602", "run": "00", "hour": "007", "altitudeFeet": 33000, "region": "us"})
-
-    def test_fetch_turbli_invalid_altitude(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            app = TurbliApp(Path(tmp))
-            with self.assertRaises(ValueError):
-                app.fetch_turbli_image({"date": "20260602", "run": "00", "hour": "006", "altitudeFeet": 1000, "region": "us"})
-
-    def test_fetch_turbli_invalid_region(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            app = TurbliApp(Path(tmp))
-            with self.assertRaises(ValueError):
-                app.fetch_turbli_image({"date": "20260602", "run": "00", "hour": "006", "altitudeFeet": 33000, "region": "us/eu"})
-
-    def test_fetch_turbli_non_jpeg_content_type_raises(self):
-        class FakeHeaders:
-            def get_content_type(self):
-                return "text/html"
-
-        class FakeResponse:
-            headers = FakeHeaders()
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                pass
-
-            def read(self):
-                return b"<html>"
-
-        with tempfile.TemporaryDirectory() as tmp:
-            app = TurbliApp(Path(tmp))
-            with patch("urllib.request.urlopen", return_value=FakeResponse()):
-                with self.assertRaises(ValueError, msg="not a JPEG"):
-                    app.fetch_turbli_image({
-                        "date": "20260602", "run": "00", "hour": "006",
-                        "altitudeFeet": 33000, "region": "us",
-                    })
-
-    def test_fetch_turbli_http_403_raises_without_saving_remote_source(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            app = TurbliApp(Path(tmp))
-            err = urllib.error.HTTPError(url="x", code=403, msg="Forbidden", hdrs={}, fp=io.BytesIO())
-            with patch("urllib.request.urlopen", side_effect=err):
-                with self.assertRaisesRegex(ValueError, "HTTP 403"):
-                    app.fetch_turbli_image({
-                        "date": "20260602", "run": "00", "hour": "006",
-                        "altitudeFeet": 33000, "region": "us",
-                    })
-            err.close()
-            self.assertEqual(app.storage.read_sources().get("sources"), {})
-
-    def test_has_cached_turbli_source_false_when_file_missing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            app = TurbliApp(Path(tmp))
-            result = app.has_cached_turbli_source("20260602", "00", "006", 33000, "us")
-            self.assertFalse(result)
-
-    def test_has_cached_turbli_source_true_after_fetch(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            app = TurbliApp(Path(tmp))
-            with patch("urllib.request.urlopen", return_value=_fake_jpeg_response()):
-                app.fetch_turbli_image({
-                    "date": "20260602", "run": "00", "hour": "006",
-                    "altitudeFeet": 33000, "region": "us",
-                })
-            self.assertTrue(app.has_cached_turbli_source("20260602", "00", "006", 33000, "us"))
+    def test_fetch_turbli_failures_do_not_save_a_source(self):
+        failures = {
+            "not a JPEG": lambda: _fake_jpeg_response(b"<html>", "text/html"),
+            "HTTP 403": lambda: _http_error(403, ORIGIN_403),
+            "Cloudflare": lambda: _http_error(403, CLOUDFLARE_403),
+        }
+        for message, response in failures.items():
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as tmp:
+                app = TurbliApp(Path(tmp))
+                with (
+                    patch("urllib.request.urlopen", side_effect=_router({"turbli.com": response})),
+                    self.assertRaisesRegex(ValueError, message),
+                ):
+                    app.fetch_turbli_image(DIRECT)
+                self.assertEqual(app.storage.read_sources().get("sources"), {})
 
     def test_stale_remote_turbli_source_is_not_reused_as_cache_hit(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = TurbliApp(Path(tmp))
-            source_id = app.turbli_source_id("20260602", "00", "006", 33000, "us")
+            source_id = app.turbli_source_id(TurbliFrame("20260602", "00", "006"), 33000, "us")
             app.storage.write_sources({
                 "activeSourceId": source_id,
                 "sources": {
@@ -393,66 +338,56 @@ class PersistenceTests(unittest.TestCase):
                 },
             })
             with patch("urllib.request.urlopen", return_value=_fake_jpeg_response()) as mocked:
-                source = app.fetch_turbli_image({
-                    "date": "20260602", "run": "00", "hour": "006",
-                    "altitudeFeet": 33000, "region": "us",
-                })
+                source = app.fetch_turbli_image(DIRECT)
             self.assertFalse(source["cacheHit"])
-            self.assertEqual(len(mocked.call_args_list), 1)
+            self.assertEqual(mocked.call_count, 1)
             self.assertTrue(source["url"].startswith("/uploads/"))
 
-    def test_recent_turbli_slots_cached_slot_yielded_first(self):
+    def test_latest_fetch_reads_current_run_from_map_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app = TurbliApp(Path(tmp))
-            now = datetime(2026, 6, 2, 15, 0, tzinfo=timezone.utc)
-            with patch("urllib.request.urlopen", return_value=_fake_jpeg_response()):
-                app.fetch_turbli_image({
-                    "date": "20260602", "run": "12", "hour": "006",
-                    "altitudeFeet": 33000, "region": "us",
-                })
-            slots = list(app.recent_turbli_slots(33000, "us", now))
-            # first yielded slot should be the cached one
-            self.assertEqual(slots[0], ("20260602", "12", "006"))
-
-    def test_latest_turbli_fetch_uses_recent_available_slot(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            app = TurbliApp(Path(tmp))
-            now = datetime(2026, 6, 2, 15, 32, tzinfo=timezone.utc)
-
-            def fake_urlopen(request, *args, **kwargs):
-                return _fake_jpeg_response()
-
-            with patch("urllib.request.urlopen", side_effect=fake_urlopen) as mocked:
-                source = app.fetch_turbli_image({"latest": True}, now=now)
-            first_request = mocked.call_args_list[0].args[0]
+            routes = {"/maps/us-turbulence-map/": lambda: _fake_jpeg_response(MAP_PAGE.encode(), "text/html")}
+            with patch("urllib.request.urlopen", side_effect=_router(routes)) as mocked:
+                source = app.fetch_turbli_image({"latest": True, "altitudeFeet": 25000})
+                ahead = app.fetch_turbli_image({"latest": True, "altitudeFeet": 25000, "leadHours": 3})
+                cached = app.fetch_turbli_image({"latest": True, "altitudeFeet": 25000})
+                with self.assertRaisesRegex(ValueError, "not published"):
+                    app.fetch_turbli_image({"latest": True, "altitudeFeet": 34000})
             self.assertEqual(
-                first_request.full_url,
-                "https://turbli.com/databases/GTG_20260602_12/figures/CAT_006_33000_us.jpg",
+                [call.args[0].full_url for call in mocked.call_args_list],
+                [
+                    "https://turbli.com/maps/us-turbulence-map/",
+                    "https://turbli.com/databases/GTG_20261013_06/figures/CAT_006_25000_us.jpg",
+                    "https://turbli.com/databases/GTG_20261013_06/figures/CAT_009_25000_us.jpg",
+                ],
             )
-            self.assertEqual(source["forecastTime"], "2026-06-02T18:00:00Z")
-            cached = app.fetch_turbli_image({"latest": True}, now=now)
+            self.assertEqual(source["forecastTime"], "2026-10-13T06:00:00Z")
+            self.assertEqual(ahead["turbli"]["hour"], "009")
             self.assertTrue(cached["cacheHit"])
 
-    def test_latest_turbli_fetch_with_target_hour(self) -> None:
+    def test_latest_fetch_without_map_page_skips_unpublished_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = TurbliApp(Path(tmp))
-            now = datetime(2026, 6, 2, 15, 32, tzinfo=timezone.utc)
-            with patch("urllib.request.urlopen", return_value=_fake_jpeg_response()) as mocked:
-                source = app.fetch_turbli_image({"latest": True, "hour": "009"}, now=now)
-            first_request = mocked.call_args_list[0].args[0]
-            self.assertEqual(
-                first_request.full_url,
-                "https://turbli.com/databases/GTG_20260602_12/figures/CAT_009_33000_us.jpg",
-            )
+            now = datetime(2026, 10, 13, 5, 0, tzinfo=timezone.utc)
+            routes = {
+                "/maps/": lambda: urllib.error.URLError("page down"),
+                "GTG_20261013_06": lambda: _http_error(403, ORIGIN_403),
+            }
+            with patch("urllib.request.urlopen", side_effect=_router(routes)) as mocked:
+                source = app.fetch_turbli_image({"latest": True}, now=now)
+            self.assertEqual(source["id"], "turbli_direct:GTG_20261013_00:009:33000:us")
+            self.assertEqual(mocked.call_count, 3)
 
-    def test_latest_turbli_fetch_raises_when_all_slots_fail(self):
+    def test_latest_fetch_stops_at_cloudflare_block(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = TurbliApp(Path(tmp))
-            now = datetime(2026, 6, 2, 15, 0, tzinfo=timezone.utc)
-            err = urllib.error.URLError("connection refused")
-            with patch("urllib.request.urlopen", side_effect=err):
-                with self.assertRaises(ValueError, msg="could not fetch"):
-                    app.fetch_turbli_image({"latest": True}, now=now)
+            routes = {"turbli.com": lambda: _http_error(403, CLOUDFLARE_403)}
+            with (
+                patch("urllib.request.urlopen", side_effect=_router(routes)) as mocked,
+                self.assertRaisesRegex(ValueError, "Cloudflare"),
+            ):
+                app.fetch_turbli_image({"latest": True})
+            self.assertEqual(mocked.call_count, 2)
 
 
 if __name__ == "__main__":

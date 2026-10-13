@@ -54,39 +54,28 @@
               </select>
             </label>
             <label>Altitude
-              <div class="input-group">
-                <input id="altitudeFetchInput" type="number" value="33000" step="3000">
-                <select id="altitudeFetchSelect">
-                  <option value="">--</option>
-                  <option value="3000">3k</option>
-                  <option value="9000">9k</option>
-                  <option value="15000">15k</option>
-                  <option value="21000">21k</option>
-                  <option value="27000">27k</option>
-                  <option value="30000">30k</option>
-                  <option value="33000">33k</option>
-                  <option value="36000">36k</option>
-                  <option value="39000">39k</option>
-                  <option value="42000">42k</option>
-                  <option value="45000">45k</option>
-                </select>
-              </div>
+              <select id="altitudeFetchSelect">
+                <option value="15000">15,000 ft</option>
+                <option value="20000">20,000 ft</option>
+                <option value="25000">25,000 ft</option>
+                <option value="30000">30,000 ft</option>
+                <option value="33000" selected>33,000 ft</option>
+                <option value="36000">36,000 ft</option>
+                <option value="39000">39,000 ft</option>
+              </select>
             </label>
             <label>Forecast
-              <div class="input-group">
-                <input id="forecastHourFetchInput" type="number" placeholder="Latest" step="3">
-                <select id="forecastHourFetchSelect">
-                  <option value="">--</option>
-                  <option value="3">3h</option>
-                  <option value="6">6h</option>
-                  <option value="9">9h</option>
-                  <option value="12">12h</option>
-                  <option value="18">18h</option>
-                  <option value="24">24h</option>
-                  <option value="36">36h</option>
-                  <option value="48">48h</option>
-                </select>
-              </div>
+              <select id="leadFetchSelect">
+                <option value="0">Now</option>
+                <option value="3">+3 h</option>
+                <option value="6">+6 h</option>
+                <option value="9">+9 h</option>
+                <option value="12">+12 h</option>
+                <option value="15">+15 h</option>
+                <option value="18">+18 h</option>
+                <option value="21">+21 h</option>
+                <option value="24">+24 h</option>
+              </select>
             </label>
           </div>
         </fieldset>

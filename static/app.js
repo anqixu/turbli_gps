@@ -1,4 +1,7 @@
 const IDENTITY_TRANSFORM = { x: 0, y: 0, scale: 1, rotation: 0 };
+// Map units: the SVG viewBox, which every layer shares.
+const MAP_WIDTH = 1000;
+const MAP_HEIGHT = 620;
 const IS_ANDROID = /Android/i.test(navigator.userAgent);
 const SENSITIVITY = IS_ANDROID ? 0.7 : 1.0;
 
@@ -11,6 +14,8 @@ const state = {
   activeSource: null,
   serverState: null,
   overlayNatural: { width: 0, height: 0 },
+  // Rendered map plane size in CSS px; cached so gestures never force a layout read.
+  planeSize: { width: MAP_WIDTH, height: MAP_HEIGHT },
   watchId: null,
   lastFix: null,
   lastPositionRenderAt: 0,
@@ -53,10 +58,8 @@ const el = {
   sourceAltitude: document.querySelector("#sourceAltitudeValue"),
   turbliFetch: document.querySelector("#turbliFetchButton"),
   region: document.querySelector("#regionSelect"),
-  altitudeFetch: document.querySelector("#altitudeFetchInput"),
-  altitudeFetchSelect: document.querySelector("#altitudeFetchSelect"),
-  forecastFetch: document.querySelector("#forecastHourFetchInput"),
-  forecastFetchSelect: document.querySelector("#forecastHourFetchSelect"),
+  altitudeFetch: document.querySelector("#altitudeFetchSelect"),
+  leadFetch: document.querySelector("#leadFetchSelect"),
   opacity: document.querySelector("#opacityInput"),
   wireframe: document.querySelector("#wireframeInput")
 };
@@ -119,17 +122,13 @@ function setActiveTransform(next, autosave = true) {
   applyTransforms();
 }
 
-function webMercator(lon, lat) {
+function project(lon, lat) {
   const clamped = Math.max(-85.05112878, Math.min(85.05112878, lat));
   const radius = 6378137;
   return [
     radius * lon * Math.PI / 180,
     radius * Math.log(Math.tan(Math.PI / 4 + clamped * Math.PI / 360))
   ];
-}
-
-function project(lon, lat) {
-  return webMercator(lon, lat);
 }
 
 function visitCoordinates(geometry, callback) {
@@ -160,8 +159,8 @@ function computeProjection() {
 function toScreen(x, y) {
   const b = state.bounds;
   const pad = 24;
-  const width = 1000 - pad * 2;
-  const height = 620 - pad * 2;
+  const width = MAP_WIDTH - pad * 2;
+  const height = MAP_HEIGHT - pad * 2;
   const scale = Math.min(width / (b.maxX - b.minX), height / (b.maxY - b.minY));
   const usedWidth = (b.maxX - b.minX) * scale;
   const usedHeight = (b.maxY - b.minY) * scale;
@@ -170,27 +169,17 @@ function toScreen(x, y) {
   return [ox + (x - b.minX) * scale, oy + (b.maxY - y) * scale, scale];
 }
 
-function screenToMapPixels(sx, sy) {
-  const rect = el.plane.getBoundingClientRect();
-  return {
-    x: sx / 1000 * rect.width,
-    y: sy / 620 * rect.height
-  };
-}
-
 function mapUnitsToPixels(x, y) {
-  const rect = el.plane.getBoundingClientRect();
   return {
-    x: x / 1000 * rect.width,
-    y: y / 620 * rect.height
+    x: x / MAP_WIDTH * state.planeSize.width,
+    y: y / MAP_HEIGHT * state.planeSize.height
   };
 }
 
 function pixelsToMapUnits(dx, dy) {
-  const rect = el.plane.getBoundingClientRect();
   return {
-    x: dx / Math.max(1, rect.width) * 1000,
-    y: dy / Math.max(1, rect.height) * 620
+    x: dx / state.planeSize.width * MAP_WIDTH,
+    y: dy / state.planeSize.height * MAP_HEIGHT
   };
 }
 
@@ -205,10 +194,9 @@ function rotatePoint(x, y, degrees) {
 }
 
 function centerViewOnSvgPoint(sx, sy) {
-  const rect = el.plane.getBoundingClientRect();
-  const point = screenToMapPixels(sx, sy);
-  const dx = point.x - rect.width / 2;
-  const dy = point.y - rect.height / 2;
+  const point = mapUnitsToPixels(sx, sy);
+  const dx = point.x - state.planeSize.width / 2;
+  const dy = point.y - state.planeSize.height / 2;
   const rotated = rotatePoint(dx, dy, state.viewTransform.rotation);
   state.viewTransform = {
     ...state.viewTransform,
@@ -243,8 +231,8 @@ function renderMap() {
     path.dataset.name = feature.properties?.name || "";
     el.svg.appendChild(path);
   });
-  if (state.lastFix) updatePosition(state.lastFix);
   applyTransforms();
+  if (state.lastFix) updatePosition(state.lastFix);
 }
 
 function transformCss(transform, center = false, mapRelative = false) {
@@ -255,15 +243,16 @@ function transformCss(transform, center = false, mapRelative = false) {
 
 function updateMapPlaneSize() {
   const rect = el.map.getBoundingClientRect();
-  const aspect = 1000 / 620;
+  const aspect = MAP_WIDTH / MAP_HEIGHT;
   let width = rect.width;
   let height = width / aspect;
   if (height > rect.height) {
     height = rect.height;
     width = height * aspect;
   }
-  el.plane.style.width = `${Math.max(1, width)}px`;
-  el.plane.style.height = `${Math.max(1, height)}px`;
+  state.planeSize = { width: Math.max(1, width), height: Math.max(1, height) };
+  el.plane.style.width = `${state.planeSize.width}px`;
+  el.plane.style.height = `${state.planeSize.height}px`;
 }
 
 function overlayBaseSizeUnits() {
@@ -278,7 +267,7 @@ function overlayBaseSizeUnits() {
 
 function updateOverlayGeometry() {
   const size = overlayBaseSizeUnits();
-  const topLeft = mapUnitsToPixels(500, 310);
+  const topLeft = mapUnitsToPixels(MAP_WIDTH / 2, MAP_HEIGHT / 2);
   const pixelSize = mapUnitsToPixels(size.width, size.height);
   el.overlay.style.left = `${topLeft.x}px`;
   el.overlay.style.top = `${topLeft.y}px`;
@@ -392,9 +381,9 @@ function projectedAccuracyRadius(c, sx, sy) {
   const latOffset = c.accuracy / 110540;
   const [eastX, eastY] = toScreen(...project(c.longitude + lonOffset, c.latitude));
   const [northX, northY] = toScreen(...project(c.longitude, c.latitude + latOffset));
-  const east = screenToMapPixels(eastX, eastY);
-  const north = screenToMapPixels(northX, northY);
-  const center = screenToMapPixels(sx, sy);
+  const east = mapUnitsToPixels(eastX, eastY);
+  const north = mapUnitsToPixels(northX, northY);
+  const center = mapUnitsToPixels(sx, sy);
   return Math.max(
     Math.hypot(east.x - center.x, east.y - center.y),
     Math.hypot(north.x - center.x, north.y - center.y)
@@ -436,8 +425,8 @@ function updatePosition(position) {
   fields.altitude.textContent = altitudeDisplayText(position);
 
   const [sx, sy] = toScreen(...project(c.longitude, c.latitude));
-  const px = sx / 10;
-  const py = sy / 6.2;
+  const px = sx / MAP_WIDTH * 100;
+  const py = sy / MAP_HEIGHT * 100;
   el.dot.hidden = false;
   el.accuracy.hidden = false;
   el.altitudeRing.hidden = !Number.isFinite(c.altitudeAccuracy);
@@ -492,17 +481,17 @@ async function api(path, options = {}) {
     headers: { "Content-Type": "application/json" },
     ...options
   });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || response.statusText);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `${response.status} ${response.statusText}`);
   return payload;
 }
 
 async function fetchTurbliSource(force = false) {
   const payload = {
     latest: true,
-    altitudeFeet: parseInt(el.altitudeFetch.value) || 33000,
-    hour: el.forecastFetch.value || "",
-    region: el.region.value || "us",
+    altitudeFeet: Number(el.altitudeFetch.value),
+    leadHours: Number(el.leadFetch.value),
+    region: el.region.value,
     force
   };
   setStatus("Fetching latest Turbli image...");
@@ -511,9 +500,6 @@ async function fetchTurbliSource(force = false) {
     body: JSON.stringify(payload)
   });
   await loadState();
-  await setSource(source);
-  state.imageTransform = { ...IDENTITY_TRANSFORM };
-  applyTransforms();
   setStatus(source.cacheHit ? "Turbli image loaded from cache" : "Turbli image fetched and cached");
 }
 
@@ -537,12 +523,11 @@ async function uploadFile(file) {
   if (!file || !file.type.startsWith("image/")) return;
   setStatus("Uploading image...");
   const dataUrl = await readFileAsDataUrl(file);
-  const source = await api("/api/upload", {
+  await api("/api/upload", {
     method: "POST",
     body: JSON.stringify({ name: file.name || "pasted-image.png", dataUrl })
   });
   await loadState();
-  await setSource(source);
   setStatus("Image ready. Alignment autosaves.");
 }
 
@@ -580,6 +565,12 @@ function gestureAngle(points) {
   return Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI;
 }
 
+function gestureDelta(dx, dy) {
+  const x = dx * SENSITIVITY;
+  const y = dy * SENSITIVITY;
+  return state.mode === "image" ? pixelsToMapUnits(x, y) : { x, y };
+}
+
 function beginGesture(event) {
   const points = [...state.pointerMap.values()];
   const transform = { ...activeTransform() };
@@ -612,11 +603,7 @@ function updateGesture(event) {
       x: (points[0].x + points[1].x) / 2,
       y: (points[0].y + points[1].y) / 2
     };
-    const deltaX = (center.x - state.gesture.center.x) * SENSITIVITY;
-    const deltaY = (center.y - state.gesture.center.y) * SENSITIVITY;
-    const delta = state.mode === "image"
-      ? pixelsToMapUnits(deltaX, deltaY)
-      : { x: deltaX, y: deltaY };
+    const delta = gestureDelta(center.x - state.gesture.center.x, center.y - state.gesture.center.y);
     const next = {
       x: state.gesture.transform.x + delta.x,
       y: state.gesture.transform.y + delta.y,
@@ -633,11 +620,7 @@ function updateGesture(event) {
     });
     return;
   }
-  const deltaX = (event.clientX - state.gesture.x) * SENSITIVITY;
-  const deltaY = (event.clientY - state.gesture.y) * SENSITIVITY;
-  const delta = state.mode === "image"
-    ? pixelsToMapUnits(deltaX, deltaY)
-    : { x: deltaX, y: deltaY };
+  const delta = gestureDelta(event.clientX - state.gesture.x, event.clientY - state.gesture.y);
   setActiveTransform({
     ...state.gesture.transform,
     x: state.gesture.transform.x + delta.x,
@@ -697,6 +680,21 @@ function setPanelCollapsed(collapsed) {
   el.panelHandle.setAttribute("aria-expanded", collapsed ? "false" : "true");
 }
 
+function beginPanelGesture(event) {
+  state.panelGesture = { x: event.clientX, y: event.clientY };
+}
+
+function endPanelGesture(event) {
+  const start = state.panelGesture;
+  state.panelGesture = null;
+  if (!start) return null;
+  return {
+    dx: event.clientX - start.x,
+    dy: event.clientY - start.y,
+    mobile: window.matchMedia("(max-width: 820px)").matches
+  };
+}
+
 function bindPanelHandle() {
   el.panelHandle.addEventListener("click", () => {
     if (state.suppressPanelClick) {
@@ -706,49 +704,30 @@ function bindPanelHandle() {
     setPanelCollapsed(!el.app.classList.contains("panel-collapsed"));
   });
   el.panelHandle.addEventListener("pointerdown", event => {
-    state.panelGesture = {
-      x: event.clientX,
-      y: event.clientY,
-      collapsed: el.app.classList.contains("panel-collapsed")
-    };
+    beginPanelGesture(event);
     el.panelHandle.setPointerCapture(event.pointerId);
   });
   el.panelHandle.addEventListener("pointerup", event => {
-    if (!state.panelGesture) return;
-    const dx = event.clientX - state.panelGesture.x;
-    const dy = event.clientY - state.panelGesture.y;
-    const mobile = window.matchMedia("(max-width: 820px)").matches;
-    if (mobile && Math.abs(dy) > 36) {
-      setPanelCollapsed(dy > 0);
-      state.suppressPanelClick = true;
-    } else if (!mobile && Math.abs(dx) > 36) {
-      setPanelCollapsed(dx > 0);
+    const swipe = endPanelGesture(event);
+    if (!swipe) return;
+    const travel = swipe.mobile ? swipe.dy : swipe.dx;
+    if (Math.abs(travel) > 36) {
+      setPanelCollapsed(travel > 0);
       state.suppressPanelClick = true;
     }
-    state.panelGesture = null;
   });
   el.panelHandle.addEventListener("pointercancel", () => {
     state.panelGesture = null;
   });
   el.panel.addEventListener("pointerdown", event => {
-    if (event.target === el.panelHandle) return;
-    state.panelGesture = {
-      x: event.clientX,
-      y: event.clientY,
-      collapsed: el.app.classList.contains("panel-collapsed")
-    };
+    if (event.target !== el.panelHandle) beginPanelGesture(event);
   });
   el.panel.addEventListener("pointerup", event => {
-    if (!state.panelGesture || event.target === el.panelHandle) return;
-    const dx = event.clientX - state.panelGesture.x;
-    const dy = event.clientY - state.panelGesture.y;
-    const mobile = window.matchMedia("(max-width: 820px)").matches;
-    if (mobile && dy > 48 && Math.abs(dy) > Math.abs(dx) * 1.4) {
-      setPanelCollapsed(true);
-    } else if (!mobile && dx > 48 && Math.abs(dx) > Math.abs(dy) * 1.4) {
-      setPanelCollapsed(true);
-    }
-    state.panelGesture = null;
+    if (event.target === el.panelHandle) return;
+    const swipe = endPanelGesture(event);
+    if (!swipe) return;
+    const [along, across] = swipe.mobile ? [swipe.dy, swipe.dx] : [swipe.dx, swipe.dy];
+    if (along > 48 && Math.abs(along) > Math.abs(across) * 1.4) setPanelCollapsed(true);
   });
 }
 
@@ -763,7 +742,6 @@ function bindEvents() {
     state.viewTransform = { ...IDENTITY_TRANSFORM };
     saveViewTransform();
     applyTransforms();
-    renderMap();
   });
   el.locate.addEventListener("click", () => {
     if (!navigator.geolocation) {
@@ -827,17 +805,14 @@ function bindEvents() {
   el.turbliFetch.addEventListener("click", () => {
     fetchTurbliSource().catch(error => setStatus(error.message));
   });
-  el.region.addEventListener("change", async () => {
+  el.region.addEventListener("change", () => {
     setStatus(`Switching map to ${el.region.value}...`);
-    await loadMapData(el.region.value);
-    renderMap();
-    setStatus(`Map switched to ${el.region.value}`);
-  });
-  el.altitudeFetchSelect.addEventListener("change", () => {
-    if (el.altitudeFetchSelect.value) el.altitudeFetch.value = el.altitudeFetchSelect.value;
-  });
-  el.forecastFetchSelect.addEventListener("change", () => {
-    el.forecastFetch.value = el.forecastFetchSelect.value;
+    loadMapData(el.region.value)
+      .then(() => {
+        renderMap();
+        setStatus(`Map switched to ${el.region.value}`);
+      })
+      .catch(error => setStatus(error.message));
   });
   el.opacity.addEventListener("input", () => {
     el.overlay.style.opacity = el.opacity.value;
@@ -861,24 +836,24 @@ function bindEvents() {
     });
   }
   bindMapGestures();
-  window.addEventListener("resize", () => {
+  const relayout = () => {
     applyTransforms();
     if (state.lastFix) updatePosition(state.lastFix);
-  });
+  };
+  // The map fills the viewport, so observing it also covers window resizes.
   if ("ResizeObserver" in window) {
-    const observer = new ResizeObserver(() => {
-      applyTransforms();
-      if (state.lastFix) updatePosition(state.lastFix);
-    });
-    observer.observe(el.map);
+    new ResizeObserver(relayout).observe(el.map);
+  } else {
+    window.addEventListener("resize", relayout);
   }
 }
 
+const MAP_FILES = { us: "us-states.geojson", europe: "europe.geojson", world: "world.geojson" };
+
 async function loadMapData(region) {
-  let file = "us-states.geojson";
-  if (region === "world") file = "world.geojson";
-  if (region === "europe") file = "europe.geojson";
-  state.geojson = await fetch(`/data/${file}`).then(res => res.json());
+  const response = await fetch(`/data/${MAP_FILES[region] || MAP_FILES.us}`);
+  if (!response.ok) throw new Error(`Map outline failed to load: ${response.status}`);
+  state.geojson = await response.json();
 }
 
 async function start() {
