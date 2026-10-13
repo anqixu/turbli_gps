@@ -45,7 +45,8 @@ const state = {
   suppressPanelClick: false,
   saveTimer: null,
   // Set while an alignment save should not announce itself (autofit success).
-  quietSave: false
+  quietSave: false,
+  toastTimer: null
 };
 
 const el = {
@@ -77,6 +78,7 @@ const el = {
   x: document.querySelector("#xInput"),
   y: document.querySelector("#yInput"),
   status: document.querySelector("#statusLine"),
+  toast: document.querySelector("#toast"),
   source: document.querySelector("#sourceValue"),
   scrape: document.querySelector("#scrapeValue"),
   forecast: document.querySelector("#forecastValue"),
@@ -94,8 +96,29 @@ const fields = {
   altitude: document.querySelector("#altitudeValue")
 };
 
-function setStatus(message) {
+// Seconds a toast stays up. Warnings stay longer and can be tapped away.
+const TOAST_SECONDS = { info: 3, warning: 8 };
+
+// Shows message in the panel's status line and, because the panel is usually
+// collapsed (always on phones), as a toast over the map. toast: false updates
+// only the status line.
+function setStatus(message, { kind = "info", toast = true } = {}) {
   el.status.value = message;
+  if (!toast || !message) return;
+  el.toast.textContent = message;
+  el.toast.classList.toggle("is-warning", kind === "warning");
+  el.toast.hidden = false;
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(hideToast, TOAST_SECONDS[kind] * 1000);
+}
+
+function setWarning(message) {
+  setStatus(message, { kind: "warning" });
+}
+
+function hideToast() {
+  clearTimeout(state.toastTimer);
+  el.toast.hidden = true;
 }
 
 function formatMegabytes(bytes) {
@@ -584,7 +607,7 @@ function stopGpsWatch() {
 }
 
 function handlePositionError(error) {
-  setStatus(error.message);
+  setWarning(error.message);
   if (error.code === error.PERMISSION_DENIED) stopGpsWatch();
 }
 
@@ -703,12 +726,12 @@ async function autofitOverlay() {
   const image = ctx.getImageData(0, 0, width, height);
   const models = Object.keys(PROJECTIONS).map(projection => ({ projection, points: modelPoints(projection) }));
   const fit = await autofitImage(image, models, (_, projection) => {
-    setStatus(`Autofitting ${PROJECTIONS[projection].label} outlines...`);
+    setStatus(`Autofitting ${PROJECTIONS[projection].label} outlines...`, { toast: false });
   });
   if (!fit.ok) {
     const reason = `outlines matched only ${Math.round(Math.max(0, fit.match) * 100)}%; pick the region the image shows, or align by hand`;
     setAutofitWarning(reason);
-    setStatus(`Warning: autofit failed, ${reason}`);
+    setWarning(`Autofit failed: ${reason}`);
     return;
   }
   setAutofitWarning(null);
@@ -717,7 +740,7 @@ async function autofitOverlay() {
   else applyTransforms();
   state.quietSave = true;
   scheduleAlignmentSave();
-  setStatus(previousStatus);
+  setStatus(previousStatus, { toast: false });
 }
 
 function whenOverlayLoaded() {
@@ -783,7 +806,7 @@ async function saveAlignment() {
     });
     if (!quiet) setStatus("Alignment saved");
   } catch (error) {
-    setStatus(`Autosave failed: ${error.message}`);
+    setWarning(`Autosave failed: ${error.message}`);
   }
 }
 
@@ -903,7 +926,7 @@ function bindMapGestures() {
   el.map.addEventListener("drop", async event => {
     event.preventDefault();
     const file = [...event.dataTransfer.files].find(item => item.type.startsWith("image/"));
-    await uploadFile(file).catch(e => setStatus(e.message));
+    await uploadFile(file).catch(e => setWarning(e.message));
   });
 }
 
@@ -965,6 +988,7 @@ function bindPanelHandle() {
 
 function bindEvents() {
   bindPanelHandle();
+  el.toast.addEventListener("click", hideToast);
   el.modeToggle.addEventListener("click", () => {
     state.mode = state.mode === "image" ? "view" : "image";
     applyTransforms();
@@ -1010,13 +1034,13 @@ function bindEvents() {
   el.overlay.addEventListener("error", () => {
     const failedUrl = sourceUrl();
     clearOverlay();
-    setStatus(failedUrl ? `Image failed to load: ${failedUrl}` : "Image failed to load");
+    setWarning(failedUrl ? `Image failed to load: ${failedUrl}` : "Image failed to load");
   });
   fields.coord.addEventListener("click", copyCoordinates);
   el.source.addEventListener("click", copySourceUrl);
   el.uploadButton.addEventListener("click", () => el.upload.click());
   el.upload.addEventListener("change", async () => {
-    await uploadFile(el.upload.files?.[0]).catch(e => setStatus(e.message));
+    await uploadFile(el.upload.files?.[0]).catch(e => setWarning(e.message));
     el.upload.value = "";
   });
   el.resetImage.addEventListener("click", () => {
@@ -1031,27 +1055,27 @@ function bindEvents() {
       ?.getAsFile();
     if (file) {
       event.preventDefault();
-      await uploadFile(file).catch(e => setStatus(e.message));
+      await uploadFile(file).catch(e => setWarning(e.message));
     }
   });
   el.turbliFetch.addEventListener("click", () => {
-    fetchTurbliSource().catch(error => setStatus(error.message));
+    fetchTurbliSource().catch(error => setWarning(error.message));
   });
   el.autofit.addEventListener("click", () => {
-    autofitOverlay().catch(error => setStatus(`Autofit failed: ${error.message}`));
+    autofitOverlay().catch(error => setWarning(`Autofit failed: ${error.message}`));
   });
   el.region.addEventListener("change", () => {
     if (el.region.value === "route" && !state.route) setStatus("Type a route like SEA-MUC");
     selectRegion(el.region.value)
       .then(() => setStatus(`Map switched to ${el.region.selectedOptions[0].textContent}`))
-      .catch(error => setStatus(error.message));
+      .catch(error => setWarning(error.message));
   });
   el.routeInput.addEventListener("change", () => {
-    if (el.routeInput.value.trim()) setRoute(el.routeInput.value.trim()).catch(error => setStatus(error.message));
+    if (el.routeInput.value.trim()) setRoute(el.routeInput.value.trim()).catch(error => setWarning(error.message));
   });
   for (const input of [el.altitudeFetch, el.leadFetch]) {
     input.addEventListener("change", () => {
-      if (state.activeSource?.kind === "turbli_grid") fetchTurbliSource().catch(error => setStatus(error.message));
+      if (state.activeSource?.kind === "turbli_grid") fetchTurbliSource().catch(error => setWarning(error.message));
     });
   }
   el.opacity.addEventListener("input", () => {
@@ -1117,7 +1141,7 @@ async function start() {
   } catch {}
   await selectRegion(el.region.value);
   await loadState();
-  setStatus("Ready");
+  setStatus("Ready", { toast: false });
 }
 
-start().catch(error => setStatus(error.message));
+start().catch(error => setWarning(error.message));

@@ -172,6 +172,39 @@ input[type="text"] {
   cursor: grabbing;
 }
 
+.toast {
+  position: fixed;
+  top: max(16px, env(safe-area-inset-top));
+  left: 50%;
+  z-index: 30;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 9px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(29, 34, 40, 0.94);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.toast[hidden] {
+  display: none;
+}
+
+.toast.is-warning {
+  border-color: var(--accent-2);
+  color: #ffe2a0;
+}
+
+.toast.is-warning::before {
+  content: "Warning: ";
+  font-weight: 700;
+}
+
 .paste-hint {
   position: absolute;
   left: 16px;

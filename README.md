@@ -146,6 +146,8 @@ Open `http://127.0.0.1:8765` in your browser.
 - **Clipboard:** opens image upload; pasted or dropped images also work.
 - **Hamburger:** expands or collapses the control pane.
 
+Status messages, such as download progress and saved alignments, appear as a toast at the top of the screen, because the control pane is usually collapsed and always is on phones. Warnings stay up for 8 seconds; tap a toast to dismiss it.
+
 ## Data
 
 Runtime data is written under `data/` and is intentionally ignored by git:
