@@ -12,9 +12,10 @@
         <div id="map" class="map">
           <div id="mapPlane" class="map-plane">
             <div id="worldLayer" class="world-layer">
+              <div id="gridBackground" class="grid-background" hidden></div>
               <canvas id="gridCanvas" class="grid-canvas" hidden></canvas>
-              <svg id="mapSvg" class="map-svg" viewBox="0 0 1000 620" aria-label="Map outline"></svg>
               <img id="overlayImage" class="overlay-image" alt="">
+              <svg id="mapSvg" class="map-svg outline-svg" viewBox="0 0 1000 620" aria-label="Map outline"></svg>
               <svg id="routeSvg" class="map-svg route-svg" viewBox="0 0 1000 620" aria-label="Flight route"></svg>
               <div id="accuracyRing" class="accuracy-ring" hidden></div>
               <div id="altitudeRing" class="altitude-ring" hidden></div>
@@ -106,7 +107,8 @@
         <fieldset>
           <legend>View</legend>
           <div class="controls">
-            <label>Opacity <input id="opacityInput" type="range" min="0" max="1" value="0.72" step="0.01"></label>
+            <label>Turbulence <input id="opacityInput" type="range" min="0" max="1" value="0.72" step="0.01" title="Opacity of the turbulence grid or map image"></label>
+            <label>Background <input id="backgroundInput" type="range" min="0" max="1" value="0" step="0.01" title="White background under the turbulence grid, as on turbli.com"></label>
             <label>Wireframe <input id="wireframeInput" type="range" min="0" max="3" value="0.75" step="0.05"></label>
           </div>
         </fieldset>

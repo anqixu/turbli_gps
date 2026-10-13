@@ -140,11 +140,14 @@ Open `http://127.0.0.1:8765` in your browser.
 - **Cloud:** fetches Turbli's turbulence grid, or its map image when Data is set to "Map image", for the selected altitude and forecast lead time ("Now" to +24 h). Changing altitude or lead time re-fetches the grid. The status line shows download progress; Turbli sends no `Content-Length`, so the percentage is estimated from the previous download of the same kind.
 - **Target:** autofits the outlines to the current image. A badge on the button marks a failed fit; hover over it for the reason.
 - **Route:** type two airport codes, such as `SEA-MUC`, to draw the great circle and fit the view to it.
-- **Compass:** starts or stops browser GPS tracking.
+- **Compass:** starts or stops browser GPS tracking; it turns green while tracking.
 - **Reset:** returns the map view to its default position.
 - **Image:** toggles between aligning the image and moving the canvas.
 - **Clipboard:** opens image upload; pasted or dropped images also work.
 - **Hamburger:** expands or collapses the control pane.
+- **Turbulence** and **Background** sliders: the opacity of the turbulence grid or map image, and of a white background under the grid that recreates turbli.com's look. The map outlines are always drawn on top.
+
+Two-finger gestures zoom and rotate about the point between the fingers, and the mouse wheel zooms about the cursor, whether moving the map or the image.
 
 Status messages, such as download progress and saved alignments, appear as a toast at the top of the screen, because the control pane is usually collapsed and always is on phones. Warnings stay up for 8 seconds; tap a toast to dismiss it.
 

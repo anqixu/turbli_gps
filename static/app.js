@@ -58,6 +58,8 @@ const el = {
   world: document.querySelector("#worldLayer"),
   svg: document.querySelector("#mapSvg"),
   gridCanvas: document.querySelector("#gridCanvas"),
+  gridBackground: document.querySelector("#gridBackground"),
+  background: document.querySelector("#backgroundInput"),
   routeSvg: document.querySelector("#routeSvg"),
   routeInput: document.querySelector("#routeInput"),
   fetchKind: document.querySelector("#fetchKindSelect"),
@@ -362,6 +364,7 @@ function drawGrid() {
   const active = Boolean(state.grid);
   el.app.classList.toggle("grid-active", active);
   el.gridCanvas.hidden = !active;
+  updateLayerStyles();
   if (active) renderGrid(el.gridCanvas, state.grid, MAP_WIDTH, MAP_HEIGHT, (sx, sy) => screenToLonLat(sx, sy));
 }
 
@@ -369,6 +372,34 @@ async function setProjection(projection) {
   if (!PROJECTIONS[projection] || projection === state.projection) return;
   state.projection = projection;
   renderMap();
+}
+
+// Grid background and outline colour follow how light the layers under the
+// outlines are, so outlines stay readable on Turbli's white or the dark map.
+function updateLayerStyles() {
+  const root = document.documentElement.style;
+  const background = state.grid ? Number(el.background.value) : 0;
+  const imageLight = hasImage() ? Number(el.opacity.value) : 0;
+  root.setProperty("--grid-background", background);
+  root.setProperty("--outline-color", Math.max(background, imageLight) > 0.45 ? "#2f3b44" : "#80909b");
+  el.app.classList.toggle("image-active", hasImage());
+  el.gridBackground.hidden = !state.grid;
+  el.overlay.style.opacity = el.opacity.value;
+  el.gridCanvas.style.opacity = el.opacity.value;
+}
+
+function loadViewSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("turbliGpsViewSettings") || "{}");
+    if (saved.opacity != null) el.opacity.value = saved.opacity;
+    if (saved.background != null) el.background.value = saved.background;
+  } catch {}
+}
+
+function saveViewSettings() {
+  try {
+    localStorage.setItem("turbliGpsViewSettings", JSON.stringify({ opacity: el.opacity.value, background: el.background.value }));
+  } catch {}
 }
 
 function hasImage() {
@@ -441,6 +472,7 @@ function clearOverlay() {
   el.overlay.style.display = "none";
   state.overlayNatural = { width: 0, height: 0 };
   el.pasteHint.hidden = false;
+  updateLayerStyles();
 }
 
 async function setSource(source) {
@@ -820,67 +852,101 @@ function gestureAngle(points) {
   return Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI;
 }
 
-function gestureDelta(dx, dy) {
-  const x = dx * SENSITIVITY;
-  const y = dy * SENSITIVITY;
-  return state.mode === "image" ? pixelsToMapUnits(x, y) : { x, y };
+function gestureMidpoint(points) {
+  return { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 };
+}
+
+// Gestures work in the moved layer's own pixel frame: client px for the map
+// view, and world-layer px (before the view transform) for the image. In that
+// frame a layer's transform maps a point q to origin + t + scale * R(rotation)
+// * (q - pivot), so keeping a chosen point under the fingers is plain algebra.
+// read() and write() convert the active transform's x, y to and from frame px.
+function gestureFrame() {
+  const rect = el.plane.getBoundingClientRect();
+  const planeCentre = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  if (state.mode === "view") {
+    return { origin: planeCentre, toFrame: (x, y) => ({ x, y }), read: t => ({ ...t }), write: t => t };
+  }
+  const view = state.viewTransform;
+  const centre = { x: state.planeSize.width / 2, y: state.planeSize.height / 2 };
+  return {
+    origin: centre,
+    toFrame: (x, y) => {
+      const local = rotatePoint(x - planeCentre.x - view.x, y - planeCentre.y - view.y, -view.rotation);
+      return { x: centre.x + local.x / view.scale, y: centre.y + local.y / view.scale };
+    },
+    read: t => ({ ...t, ...mapUnitsToPixels(t.x, t.y) }),
+    write: t => ({ ...t, ...pixelsToMapUnits(t.x, t.y) })
+  };
+}
+
+// Scales start by k and rotates it by degrees about the frame point `from`,
+// then moves that point to `to`.
+function pivotTransform(start, origin, from, to, k, degrees) {
+  const scale = clampScale(start.scale * k);
+  const ratio = scale / start.scale;
+  const v = rotatePoint(from.x - origin.x - start.x, from.y - origin.y - start.y, degrees);
+  return {
+    scale,
+    rotation: start.rotation + degrees,
+    x: to.x - origin.x - ratio * v.x,
+    y: to.y - origin.y - ratio * v.y
+  };
+}
+
+// Finger travel is damped on Android, as before.
+function dampedPoint(start, now) {
+  return { x: start.x + (now.x - start.x) * SENSITIVITY, y: start.y + (now.y - start.y) * SENSITIVITY };
 }
 
 function beginGesture(event) {
   const points = [...state.pointerMap.values()];
-  const transform = { ...activeTransform() };
+  const frame = gestureFrame();
+  const transform = frame.read(activeTransform());
   if (points.length >= 2) {
+    // The point between the fingers at the start of a pinch is its pivot.
+    const centre = gestureMidpoint(points);
     state.gesture = {
       kind: "pinch",
+      frame,
       transform,
-      center: {
-        x: (points[0].x + points[1].x) / 2,
-        y: (points[0].y + points[1].y) / 2
-      },
-      distance: gestureDistance(points),
+      centre,
+      anchor: frame.toFrame(centre.x, centre.y),
+      distance: Math.max(1, gestureDistance(points)),
       angle: gestureAngle(points)
     };
   } else if (points.length === 1) {
     state.gesture = {
       kind: event.button === 2 ? "rotate" : "drag",
+      frame,
       transform,
-      x: points[0].x,
-      y: points[0].y
+      start: points[0],
+      anchor: frame.toFrame(points[0].x, points[0].y)
     };
   }
 }
 
 function updateGesture(event) {
-  if (!state.gesture) return;
+  const g = state.gesture;
+  if (!g) return;
   const points = [...state.pointerMap.values()];
-  if (state.gesture.kind === "pinch" && points.length >= 2) {
-    const center = {
-      x: (points[0].x + points[1].x) / 2,
-      y: (points[0].y + points[1].y) / 2
-    };
-    const delta = gestureDelta(center.x - state.gesture.center.x, center.y - state.gesture.center.y);
-    const next = {
-      x: state.gesture.transform.x + delta.x,
-      y: state.gesture.transform.y + delta.y,
-      scale: state.gesture.transform.scale * (gestureDistance(points) / state.gesture.distance),
-      rotation: state.gesture.transform.rotation + (gestureAngle(points) - state.gesture.angle) * SENSITIVITY
-    };
-    setActiveTransform(next);
-    return;
+  let next;
+  if (g.kind === "pinch" && points.length >= 2) {
+    const moved = dampedPoint(g.centre, gestureMidpoint(points));
+    const turn = ((gestureAngle(points) - g.angle + 540) % 360) - 180;
+    next = pivotTransform(
+      g.transform, g.frame.origin, g.anchor, g.frame.toFrame(moved.x, moved.y),
+      gestureDistance(points) / g.distance, turn * SENSITIVITY
+    );
+  } else if (g.kind === "rotate") {
+    const degrees = (event.clientX - g.start.x) * 0.35 * SENSITIVITY;
+    next = pivotTransform(g.transform, g.frame.origin, g.anchor, g.anchor, 1, degrees);
+  } else {
+    const moved = dampedPoint(g.start, { x: event.clientX, y: event.clientY });
+    const to = g.frame.toFrame(moved.x, moved.y);
+    next = { ...g.transform, x: g.transform.x + to.x - g.anchor.x, y: g.transform.y + to.y - g.anchor.y };
   }
-  if (state.gesture.kind === "rotate") {
-    setActiveTransform({
-      ...state.gesture.transform,
-      rotation: state.gesture.transform.rotation + (event.clientX - state.gesture.x) * 0.35 * SENSITIVITY
-    });
-    return;
-  }
-  const delta = gestureDelta(event.clientX - state.gesture.x, event.clientY - state.gesture.y);
-  setActiveTransform({
-    ...state.gesture.transform,
-    x: state.gesture.transform.x + delta.x,
-    y: state.gesture.transform.y + delta.y
-  });
+  setActiveTransform(g.frame.write(next));
 }
 
 function bindMapGestures() {
@@ -916,9 +982,11 @@ function bindMapGestures() {
   el.map.addEventListener("wheel", event => {
     if (state.mode === "image" && !hasImage()) return;
     event.preventDefault();
-    const current = activeTransform();
+    // Zoom about the cursor.
+    const frame = gestureFrame();
+    const at = frame.toFrame(event.clientX, event.clientY);
     const zoom = Math.exp(-event.deltaY * 0.0015);
-    setActiveTransform({ ...current, scale: current.scale * zoom });
+    setActiveTransform(frame.write(pivotTransform(frame.read(activeTransform()), frame.origin, at, at, zoom, 0)));
   }, { passive: false });
   el.map.addEventListener("dragover", event => {
     event.preventDefault();
@@ -1029,6 +1097,7 @@ function bindEvents() {
       width: el.overlay.naturalWidth,
       height: el.overlay.naturalHeight
     };
+    updateLayerStyles();
     applyTransforms();
   });
   el.overlay.addEventListener("error", () => {
@@ -1078,17 +1147,19 @@ function bindEvents() {
       if (state.activeSource?.kind === "turbli_grid") fetchTurbliSource().catch(error => setWarning(error.message));
     });
   }
-  el.opacity.addEventListener("input", () => {
-    el.overlay.style.opacity = el.opacity.value;
-    el.gridCanvas.style.opacity = el.opacity.value;
-  });
+  for (const input of [el.opacity, el.background]) {
+    input.addEventListener("input", () => {
+      updateLayerStyles();
+      saveViewSettings();
+    });
+  }
   el.wireframe.addEventListener("input", () => {
     document.documentElement.style.setProperty("--wireframe-thickness", `${el.wireframe.value}px`);
   });
   
   // Set initial values
-  el.overlay.style.opacity = el.opacity.value;
-  el.gridCanvas.style.opacity = el.opacity.value;
+  loadViewSettings();
+  updateLayerStyles();
   document.documentElement.style.setProperty("--wireframe-thickness", `${el.wireframe.value}px`);
 
   for (const input of [el.scale, el.rotation, el.x, el.y]) {

@@ -108,7 +108,7 @@ input[type="text"] {
 
 .state {
   fill: #202a31;
-  stroke: #80909b;
+  stroke: var(--outline-color, #80909b);
   stroke-width: var(--wireframe-thickness, 0.75px);
   vector-effect: non-scaling-stroke;
 }
@@ -121,9 +121,27 @@ input[type="text"] {
   pointer-events: none;
 }
 
-/* Over the turbulence grid, land is only tinted so the heatmap shows through. */
+/* The outlines sit above the grid and images. Over the grid, land is only
+   tinted, less so as the white background fades in; over an image it is
+   left unfilled. */
 .grid-active .state {
-  fill: rgba(32, 42, 49, 0.35);
+  fill: rgba(32, 42, 49, calc(0.35 * (1 - var(--grid-background, 0))));
+}
+
+.image-active .state {
+  fill: none;
+}
+
+.outline-svg {
+  pointer-events: none;
+}
+
+.grid-background {
+  position: absolute;
+  inset: 0;
+  background: #ffffff;
+  opacity: var(--grid-background, 0);
+  pointer-events: none;
 }
 
 .route-svg {
@@ -355,11 +373,6 @@ input[type="text"] {
   color: #111316;
   font: 700 10px/14px system-ui, sans-serif;
   text-align: center;
-}
-
-.gps-toggle {
-  background: #7a231e;
-  border-color: #e4675b;
 }
 
 .gps-toggle.is-active {
