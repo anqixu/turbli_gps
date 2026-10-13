@@ -305,6 +305,25 @@ input[type="text"] {
   line-height: 1;
 }
 
+.icon-button.has-warning {
+  position: relative;
+  outline: 2px solid var(--accent-2);
+}
+
+.icon-button.has-warning::after {
+  content: "!";
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent-2);
+  color: #111316;
+  font: 700 10px/14px system-ui, sans-serif;
+  text-align: center;
+}
+
 .gps-toggle {
   background: #7a231e;
   border-color: #e4675b;

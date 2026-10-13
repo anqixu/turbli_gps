@@ -22,7 +22,8 @@ const AUTOFIT = {
   maxSpan: 2.0,
   scaleSteps: 26,
   candidatesPerProjection: 3,
-  minScore: 0.45      // Below this mean score the fit is reported as failed.
+  // Below this chance-corrected match the fit is reported as failed.
+  minMatch: 0.6
 };
 
 // (h, w) mask of dark, unsaturated pixels from canvas RGBA data.
@@ -107,9 +108,10 @@ function scoreImage(image, size, cap) {
   const distance = distanceTransform(mask, width, height);
   const score = new Float32Array(width * height);
   for (let i = 0; i < score.length; i++) score[i] = Math.max(0, 1 - distance[i] / cap);
-  let density = 0;
-  for (let i = 0; i < mask.length; i++) density += mask[i];
-  return { width, height, score, pxPerNatural: scale, density: density / mask.length };
+  // Mean score of a point dropped anywhere: what a random placement earns.
+  let baseline = 0;
+  for (let i = 0; i < score.length; i++) baseline += score[i];
+  return { width, height, score, pxPerNatural: scale, baseline: baseline / score.length };
 }
 
 function meanScore(map, points, fit) {
@@ -216,7 +218,9 @@ function rotateScale(x, y, theta, a) {
 }
 
 // models: [{ projection, points }]. image: ImageData of the map image.
-// Returns the best fit in natural image pixels, with its projection and score.
+// Returns the best fit in natural image pixels, with its projection, its raw
+// mean score, and its match: the score corrected for chance, so a map dense
+// with borders cannot pass with outlines that merely land near some line.
 async function autofitImage(image, models, onProgress = () => {}) {
   const coarse = scoreImage(image, AUTOFIT.coarseSize, AUTOFIT.coarseCap);
   const fine = scoreImage(image, AUTOFIT.fineSize, AUTOFIT.fineCap);
@@ -234,5 +238,6 @@ async function autofitImage(image, models, onProgress = () => {}) {
   }
   // Convert from fine-image pixels to natural image pixels.
   const k = 1 / fine.pxPerNatural;
-  return { ...best, a: best.a * k, bx: best.bx * k, by: best.by * k, ok: best.score >= AUTOFIT.minScore };
+  const match = (best.score - fine.baseline) / (1 - fine.baseline);
+  return { ...best, a: best.a * k, bx: best.bx * k, by: best.by * k, match, ok: match >= AUTOFIT.minMatch };
 }

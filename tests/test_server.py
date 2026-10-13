@@ -39,11 +39,15 @@ def post(path: str, payload: dict) -> FakeHandler:
     return handler
 
 
-def test_handler_api_state(tmp_path):
+def test_handler_api_state_and_progress(tmp_path):
     with patch("turbli_gps.server.APP", TurbliApp(tmp_path)):
         handler = FakeHandler("/api/state")
         handler.do_GET()
-    assert {"sources", "transforms"} <= handler.json().keys()
+        assert {"sources", "transforms"} <= handler.json().keys()
+
+        handler = FakeHandler("/api/progress")
+        handler.do_GET()
+        assert handler.json() == {"label": None, "received": 0, "total": None, "estimate": None}
 
 
 def test_handler_serves_static_files_and_heads(tmp_path):

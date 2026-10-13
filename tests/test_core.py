@@ -28,21 +28,28 @@ from turbli_gps.storage import JsonStore
 # ---------------------------------------------------------------------------
 
 def _fake_jpeg_response(data: bytes = b"jpeg", content_type: str = "image/jpeg"):
+    """Fake urlopen response; Turbli sends chunked bodies without Content-Length."""
+
     class FakeHeaders:
         def get_content_type(self) -> str:
             return content_type
+
+        def get(self, name, default=None):
+            return default
 
     class FakeResponse:
         headers = FakeHeaders()
 
         def __enter__(self):
+            # The same fake may be returned by several urlopen calls.
+            self.body = io.BytesIO(data)
             return self
 
         def __exit__(self, *args):
             pass
 
-        def read(self) -> bytes:
-            return data
+        def read(self, size: int = -1) -> bytes:
+            return self.body.read(size)
 
     return FakeResponse()
 
@@ -431,6 +438,12 @@ class GridAndRouteTests(unittest.TestCase):
             # EDR x 100, rounded and clamped to a byte; missing values become 0.
             self.assertEqual(list(base64.b64decode(grid["values"])), [0, 12, 40, 3, 0, 255])
             self.assertEqual(app.read_state()["sources"]["activeSourceId"], other_altitude["id"])
+            # Progress reports the last download; its size becomes the next estimate.
+            progress = app.read_progress()
+            self.assertEqual(progress["label"], "Downloading Turbli grid")
+            self.assertGreater(progress["received"], 0)
+            self.assertIsNone(progress["total"])
+            self.assertEqual(app.expected_sizes["Downloading Turbli grid"], progress["received"])
 
     def test_route_resolves_airports_and_caches_the_list(self):
         airports = (

@@ -89,7 +89,10 @@ Autofit aligns the wireframe with a map image by truncated chamfer matching:
 2. A distance transform of the mask becomes a score map that is 1 on a line and falls to 0 a few pixels away.
 3. For Mercator, Miller and equirectangular outlines in turn, an exhaustive search over scale and translation on a small copy of the image finds candidate fits. The outlines must span 40% to 200% of the image, which stops them shrinking onto one dense patch of lines.
 4. A local pattern search over scale, rotation and translation refines each candidate on a larger copy.
-5. The best fit sets the overlay transform and the map projection. A mean score below 0.45 is reported as a failure and leaves the alignment unchanged.
+5. The best fit's mean score is corrected for chance by subtracting the score map's own mean, which is what a random placement would earn. Without this, a map dense with borders passes with outlines that merely land near some line.
+6. A match of at least 0.6 sets the overlay transform and the map projection, silently. A lower match leaves the alignment unchanged and puts a warning badge on the autofit button, whose tooltip gives the reason.
+
+Autofit runs by itself when an image without its own saved alignment is pasted, dropped, or uploaded. On today's Turbli maps, correct region and image pairs match 0.74 to 0.96 and mismatched pairs 0.25 to 0.50.
 
 Turbli's US and Europe maps match Mercator outlines and its World map matches Miller outlines. Select the region the image shows before running autofit.
 
@@ -134,8 +137,8 @@ Open `http://127.0.0.1:8765` in your browser.
 
 ## Controls
 
-- **Cloud:** fetches Turbli's turbulence grid, or its map image when Data is set to "Map image", for the selected altitude and forecast lead time ("Now" to +24 h). Changing altitude or lead time re-fetches the grid.
-- **Target:** autofits the outlines to the current image.
+- **Cloud:** fetches Turbli's turbulence grid, or its map image when Data is set to "Map image", for the selected altitude and forecast lead time ("Now" to +24 h). Changing altitude or lead time re-fetches the grid. The status line shows download progress; Turbli sends no `Content-Length`, so the percentage is estimated from the previous download of the same kind.
+- **Target:** autofits the outlines to the current image. A badge on the button marks a failed fit; hover over it for the reason.
 - **Route:** type two airport codes, such as `SEA-MUC`, to draw the great circle and fit the view to it.
 - **Compass:** starts or stops browser GPS tracking.
 - **Reset:** returns the map view to its default position.

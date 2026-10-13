@@ -14,7 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -41,6 +41,7 @@ TURBLI_LAST_HOUR = 36
 # User-Agent (error 1010); this one passes while still naming the app.
 TURBLI_USER_AGENT = "Mozilla/5.0 TurbliGPS/0.1"
 TURBLI_TIMEOUT_SECONDS = 30
+READ_CHUNK_BYTES = 64 * 1024
 CATALOG_TTL_SECONDS = 600
 # turbli.com publishes run GTG_<date>_<HH> about two hours before HH:00Z and
 # labels its CAT_006 frame "Now", so forecast hours count from HH:00Z - 6 h.
@@ -187,24 +188,39 @@ def describe_http_error(exc: urllib.error.HTTPError) -> TurbliFetchError:
     return TurbliFetchError(f"failed to fetch Turbli image: HTTP {exc.code}{reason}")
 
 
-def _read_url(request: urllib.request.Request, context: ssl.SSLContext | None = None) -> HttpBody:
+ProgressCallback = Callable[[int, int | None], None]  # (bytes received, Content-Length or None)
+
+
+def _read_url(
+    request: urllib.request.Request,
+    context: ssl.SSLContext | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> HttpBody:
     with urllib.request.urlopen(request, timeout=TURBLI_TIMEOUT_SECONDS, context=context) as response:
-        return HttpBody(response.headers.get_content_type(), response.read())
+        total = int(response.headers.get("Content-Length") or 0) or None
+        chunks = []
+        received = 0
+        while chunk := response.read(READ_CHUNK_BYTES):
+            chunks.append(chunk)
+            received += len(chunk)
+            if on_progress:
+                on_progress(received, total)
+        return HttpBody(response.headers.get_content_type(), b"".join(chunks))
 
 
-def http_get(url: str, form: dict | None = None) -> HttpBody:
+def http_get(url: str, form: dict | None = None, on_progress: ProgressCallback | None = None) -> HttpBody:
     """GETs url, or POSTs form as application/x-www-form-urlencoded when given."""
     data = urllib.parse.urlencode(form).encode("ascii") if form is not None else None
     request = urllib.request.Request(url, data=data, headers={"User-Agent": TURBLI_USER_AGENT})
     try:
         try:
-            return _read_url(request)
+            return _read_url(request, on_progress=on_progress)
         except urllib.error.URLError as exc:
             if not isinstance(getattr(exc, "reason", None), ssl.SSLCertVerificationError):
                 raise
             # Some networks re-sign TLS; a public forecast image is not worth failing over.
             logger.warning("TLS verification failed for %s; retrying without verification", url)
-            return _read_url(request, ssl._create_unverified_context())
+            return _read_url(request, ssl._create_unverified_context(), on_progress)
     except urllib.error.HTTPError as exc:
         raise describe_http_error(exc) from exc
     except (urllib.error.URLError, OSError) as exc:
@@ -273,6 +289,25 @@ class TurbliApp:
         # Serialises read-modify-write of the JSON stores across server threads.
         self._lock = threading.RLock()
         self._catalogs: dict[str, CachedCatalog] = {}
+        # The download in flight, for the browser to poll. Turbli sends chunked
+        # bodies without Content-Length, so the last size of each kind of
+        # download serves as the estimate for the next one.
+        self.progress: dict = {"label": None, "received": 0, "total": None, "estimate": None}
+        self.expected_sizes: dict[str, int] = {}
+
+    def read_progress(self) -> dict:
+        return dict(self.progress)
+
+    def tracked_get(self, label: str, url: str, form: dict | None = None) -> HttpBody:
+        """http_get that publishes its progress under label."""
+        self.progress = {"label": label, "received": 0, "total": None, "estimate": self.expected_sizes.get(label)}
+
+        def on_progress(received: int, total: int | None) -> None:
+            self.progress = {**self.progress, "received": received, "total": total}
+
+        body = http_get(url, form, on_progress)
+        self.expected_sizes[label] = len(body.data)
+        return body
 
     def read_state(self) -> dict:
         return {
@@ -413,7 +448,7 @@ class TurbliApp:
             return cached.catalog
         url = f"{TURBLI_BASE_URL}/maps/{region}-turbulence-map/"
         try:
-            page = http_get(url)
+            page = self.tracked_get("Reading Turbli's current run", url)
         except TurbliFetchError as exc:
             logger.warning("Could not read %s: %s", url, exc)
             return None
@@ -432,7 +467,7 @@ class TurbliApp:
             return {**existing, "cacheHit": True}
 
         remote_url = frame.remote_url(altitude_feet, region)
-        body = http_get(remote_url)
+        body = self.tracked_get("Downloading Turbli image", remote_url)
         if body.content_type not in {"image/jpeg", "image/jpg"}:
             raise TurbliFetchError(f"Turbli returned {body.content_type}, not a JPEG")
         digest = file_sha256(body.data)
@@ -495,7 +530,7 @@ class TurbliApp:
             self.activate_source(source)
             return {**source, "cacheHit": True}
 
-        body = http_get(TURBLI_GRID_URL, {"hour": lead_hours, "file_name": frame.hour})
+        body = self.tracked_get("Downloading Turbli grid", TURBLI_GRID_URL, {"hour": lead_hours, "file_name": frame.hour})
         try:
             data = json.loads(body.data)
         except ValueError as exc:
@@ -527,7 +562,8 @@ class TurbliApp:
             cached = self.storage.airports.read({})
             if cached:
                 return cached
-            airports = parse_airports(http_get(TURBLI_AIRPORTS_URL).data.decode("utf-8", errors="replace"))
+            body = self.tracked_get("Downloading Turbli airport list", TURBLI_AIRPORTS_URL)
+            airports = parse_airports(body.data.decode("utf-8", errors="replace"))
             if not airports:
                 raise ValueError("Turbli's airport list was empty or unreadable")
             self.storage.airports.write(airports)
@@ -588,6 +624,9 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/state":
             self.send_json(APP.read_state(), head_only=head_only)
+            return
+        if path == "/api/progress":
+            self.send_json(APP.read_progress(), head_only=head_only)
             return
         self.serve_file(path, head_only)
 

@@ -43,7 +43,9 @@ const state = {
   gesture: null,
   panelGesture: null,
   suppressPanelClick: false,
-  saveTimer: null
+  saveTimer: null,
+  // Set while an alignment save should not announce itself (autofit success).
+  quietSave: false
 };
 
 const el = {
@@ -94,6 +96,47 @@ const fields = {
 
 function setStatus(message) {
   el.status.value = message;
+}
+
+function formatMegabytes(bytes) {
+  return `${(bytes / 1048576).toFixed(1)} MB`;
+}
+
+// Status text for the server's download progress. Turbli sends no
+// Content-Length, so the percentage comes from the last download's size.
+function progressText(progress) {
+  if (!progress.received) return `${progress.label}...`;
+  const total = progress.total || progress.estimate;
+  if (!total) return `${progress.label}: ${formatMegabytes(progress.received)}`;
+  const percent = Math.min(99, Math.round(100 * progress.received / total));
+  return `${progress.label}: ${formatMegabytes(progress.received)} of ${progress.total ? "" : "~"}${formatMegabytes(total)} (${percent}%)`;
+}
+
+// Runs task while polling the server's download progress into the status line.
+async function withProgress(task) {
+  let running = true;
+  (async () => {
+    while (running) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      try {
+        const progress = await api("/api/progress");
+        if (running && progress.label) setStatus(progressText(progress));
+      } catch {}
+    }
+  })();
+  try {
+    return await task();
+  } finally {
+    running = false;
+  }
+}
+
+// A failed autofit leaves a badge on its button and the reason on hover.
+function setAutofitWarning(message) {
+  const title = message ? `Autofit failed: ${message}` : "Autofit outlines to image";
+  el.autofit.classList.toggle("has-warning", Boolean(message));
+  el.autofit.title = title;
+  el.autofit.setAttribute("aria-label", title);
 }
 
 function loadViewTransform() {
@@ -385,6 +428,7 @@ async function setSource(source) {
   el.forecast.textContent = source.forecastTime || "--";
   el.sourceAltitude.textContent = source.altitudeText || "--";
 
+  setAutofitWarning(null);
   if (source.kind === "turbli_grid") {
     clearOverlay();
     el.pasteHint.hidden = true;
@@ -568,16 +612,17 @@ async function fetchTurbliSource(force = false) {
   };
   const label = grid ? "Turbli grid" : "Turbli image";
   setStatus(`Fetching ${label}...`);
-  const source = await api(grid ? "/api/turbli/grid" : "/api/turbli/fetch", {
+  const source = await withProgress(() => api(grid ? "/api/turbli/grid" : "/api/turbli/fetch", {
     method: "POST",
     body: JSON.stringify(payload)
-  });
+  }));
   await loadState();
   setStatus(`${label} ${source.cacheHit ? "loaded from cache" : "fetched and cached"}, valid ${source.forecastTime}`);
 }
 
 async function setRoute(text) {
-  const route = await api("/api/route", { method: "POST", body: JSON.stringify({ route: text }) });
+  setStatus(`Looking up ${text}...`);
+  const route = await withProgress(() => api("/api/route", { method: "POST", body: JSON.stringify({ route: text }) }));
   state.route = { text, from: route.from, to: route.to, points: greatCircle(route.from, route.to) };
   try {
     localStorage.setItem("turbliGpsRoute", JSON.stringify({ text, from: route.from, to: route.to }));
@@ -641,11 +686,14 @@ function transformFromFit(fit, width, height) {
   });
 }
 
+// Aligns the outlines with the overlay image. Success is silent; failure keeps
+// the current alignment and shows a warning on the autofit button.
 async function autofitOverlay() {
   if (!hasImage()) {
     setStatus("Paste, drop, or upload a map image first");
     return;
   }
+  const previousStatus = el.status.value;
   const { naturalWidth: width, naturalHeight: height } = el.overlay;
   const canvas = document.createElement("canvas");
   canvas.width = width;
@@ -658,14 +706,26 @@ async function autofitOverlay() {
     setStatus(`Autofitting ${PROJECTIONS[projection].label} outlines...`);
   });
   if (!fit.ok) {
-    setStatus(`Autofit failed (match ${fit.score.toFixed(2)}): pick the region the image shows, or align by hand`);
+    const reason = `outlines matched only ${Math.round(Math.max(0, fit.match) * 100)}%; pick the region the image shows, or align by hand`;
+    setAutofitWarning(reason);
+    setStatus(`Warning: autofit failed, ${reason}`);
     return;
   }
+  setAutofitWarning(null);
   state.imageTransform = transformFromFit(fit, width, height);
   if (fit.projection !== state.projection) await setProjection(fit.projection);
   else applyTransforms();
+  state.quietSave = true;
   scheduleAlignmentSave();
-  setStatus(`Autofit matched ${PROJECTIONS[fit.projection].label} outlines (match ${fit.score.toFixed(2)})`);
+  setStatus(previousStatus);
+}
+
+function whenOverlayLoaded() {
+  if (el.overlay.complete && el.overlay.naturalWidth) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    el.overlay.addEventListener("load", resolve, { once: true });
+    el.overlay.addEventListener("error", reject, { once: true });
+  });
 }
 
 async function loadState() {
@@ -688,12 +748,17 @@ async function uploadFile(file) {
   if (!file || !file.type.startsWith("image/")) return;
   setStatus("Uploading image...");
   const dataUrl = await readFileAsDataUrl(file);
-  await api("/api/upload", {
+  const source = await api("/api/upload", {
     method: "POST",
     body: JSON.stringify({ name: file.name || "pasted-image.png", dataUrl })
   });
   await loadState();
   setStatus("Image ready. Alignment autosaves.");
+  // An image without its own saved alignment is fitted straight away, and only
+  // a failure is reported. A load failure is reported by the overlay's handler.
+  if (!state.serverState.transforms?.uploads?.[source.fileHash]) {
+    await whenOverlayLoaded().then(autofitOverlay, () => {});
+  }
 }
 
 function scheduleAlignmentSave() {
@@ -703,6 +768,8 @@ function scheduleAlignmentSave() {
 }
 
 async function saveAlignment() {
+  const quiet = state.quietSave;
+  state.quietSave = false;
   if (!state.activeSource) return;
   try {
     await api("/api/transform", {
@@ -714,7 +781,7 @@ async function saveAlignment() {
         transform: { ...state.imageTransform, projection: state.projection }
       })
     });
-    setStatus("Alignment saved");
+    if (!quiet) setStatus("Alignment saved");
   } catch (error) {
     setStatus(`Autosave failed: ${error.message}`);
   }
