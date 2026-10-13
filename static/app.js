@@ -743,6 +743,18 @@ function transformFromFit(fit, width, height) {
 
 // Aligns the outlines with the overlay image. Success is silent; failure keeps
 // the current alignment and shows a warning on the autofit button.
+// Inverse of transformFromFit: the overlay transform as a fit in natural px.
+function fitFromTransform(transform, width, height) {
+  const theta = -transform.rotation * Math.PI / 180;
+  const a = width / (OVERLAY_BASE_WIDTH * transform.scale);
+  const [u, v] = rotateScale(transform.x + MAP_WIDTH / 2, transform.y + MAP_HEIGHT / 2, theta, a);
+  return { a, theta, bx: width / 2 - u, by: height / 2 - v };
+}
+
+function isAligned(transform) {
+  return transform.x !== 0 || transform.y !== 0 || transform.scale !== 1 || transform.rotation !== 0;
+}
+
 async function autofitOverlay() {
   if (!hasImage()) {
     setStatus("Paste, drop, or upload a map image first");
@@ -757,9 +769,14 @@ async function autofitOverlay() {
   ctx.drawImage(el.overlay, 0, 0);
   const image = ctx.getImageData(0, 0, width, height);
   const models = Object.keys(PROJECTIONS).map(projection => ({ projection, points: modelPoints(projection) }));
+  // An existing alignment (this image's, or inherited from the last aligned
+  // image) seeds a local fit, which suits screenshots of the same Turbli view.
+  const init = isAligned(state.imageTransform)
+    ? { ...fitFromTransform(state.imageTransform, width, height), projection: state.projection }
+    : null;
   const fit = await autofitImage(image, models, (_, projection) => {
     setStatus(`Autofitting ${PROJECTIONS[projection].label} outlines...`, { toast: false });
-  });
+  }, init);
   if (!fit.ok) {
     const reason = `outlines matched only ${Math.round(Math.max(0, fit.match) * 100)}%; pick the region the image shows, or align by hand`;
     setAutofitWarning(reason);

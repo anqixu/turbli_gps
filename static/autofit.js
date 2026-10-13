@@ -22,20 +22,55 @@ const AUTOFIT = {
   maxSpan: 2.0,
   scaleSteps: 26,
   candidatesPerProjection: 3,
+  // Local search around an existing alignment: scale within x/÷ localScale,
+  // shift within localShift of the cropped image's larger side.
+  localScale: 1.25,
+  localScaleSteps: 9,
+  localShift: 0.08,
   // Below this chance-corrected match the fit is reported as failed.
   minMatch: 0.6
 };
 
-// (h, w) mask of dark, unsaturated pixels from canvas RGBA data.
+// Running maximum over a window of 2 * radius + 1, along one axis, in place.
+function maxFilter1d(values, width, height, radius, horizontal) {
+  const [outer, inner] = horizontal ? [height, width] : [width, height];
+  const line = new Float32Array(inner);
+  for (let o = 0; o < outer; o++) {
+    const at = i => (horizontal ? o * width + i : i * width + o);
+    for (let i = 0; i < inner; i++) line[i] = values[at(i)];
+    for (let i = 0; i < inner; i++) {
+      let max = line[i];
+      for (let k = Math.max(0, i - radius); k <= Math.min(inner - 1, i + radius); k++) max = Math.max(max, line[k]);
+      values[at(i)] = max;
+    }
+  }
+}
+
+// (h, w) mask of outline pixels from canvas RGBA data: unsaturated pixels that
+// are either dark, or clearly darker than the brightest pixel nearby. The
+// second test keeps the thin grey borders a browser leaves when it shrinks a
+// Turbli map onto a phone screen; it demands near-zero chroma so the edges of
+// Turbli's pale-blue turbulence do not pass for borders.
 function lineMask(rgba, width, height) {
-  const mask = new Uint8Array(width * height);
-  for (let i = 0; i < width * height; i++) {
+  const n = width * height;
+  const luminance = new Float32Array(n);
+  const chroma = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
     const r = rgba[i * 4];
     const g = rgba[i * 4 + 1];
     const b = rgba[i * 4 + 2];
-    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-    const chroma = (Math.max(r, g, b) - Math.min(r, g, b)) / 255;
-    mask[i] = luminance < 0.55 && chroma < 0.18 && rgba[i * 4 + 3] > 128 ? 1 : 0;
+    luminance[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    chroma[i] = (Math.max(r, g, b) - Math.min(r, g, b)) / 255;
+  }
+  const nearbyMax = Float32Array.from(luminance);
+  maxFilter1d(nearbyMax, width, height, 2, true);
+  maxFilter1d(nearbyMax, width, height, 2, false);
+  const mask = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (rgba[i * 4 + 3] <= 128) continue;
+    const dark = luminance[i] < 0.55 && chroma[i] < 0.18;
+    const contrast = luminance[i] < 0.8 && chroma[i] < 0.06 && nearbyMax[i] - luminance[i] > 0.18;
+    mask[i] = dark || contrast ? 1 : 0;
   }
   return mask;
 }
@@ -217,13 +252,146 @@ function rotateScale(x, y, theta, a) {
   return [a * (Math.cos(theta) * x - Math.sin(theta) * y), a * (Math.sin(theta) * x + Math.cos(theta) * y)];
 }
 
-// models: [{ projection, points }]. image: ImageData of the map image.
-// Returns the best fit in natural image pixels, with its projection, its raw
-// mean score, and its match: the score corrected for chance, so a map dense
-// with borders cannot pass with outlines that merely land near some line.
-async function autofitImage(image, models, onProgress = () => {}) {
-  const coarse = scoreImage(image, AUTOFIT.coarseSize, AUTOFIT.coarseCap);
-  const fine = scoreImage(image, AUTOFIT.fineSize, AUTOFIT.fineCap);
+// Copies the (x, y, width, height) rectangle out of an ImageData.
+function cropImage(image, rect) {
+  const out = new ImageData(rect.width, rect.height);
+  for (let y = 0; y < rect.height; y++) {
+    const from = ((rect.y + y) * image.width + rect.x) * 4;
+    out.data.set(image.data.subarray(from, from + rect.width * 4), y * rect.width * 4);
+  }
+  return out;
+}
+
+function clampRect(rect, image) {
+  const x = Math.max(0, Math.floor(rect.x));
+  const y = Math.max(0, Math.floor(rect.y));
+  return {
+    x,
+    y,
+    width: Math.max(1, Math.min(image.width, Math.ceil(rect.x + rect.width)) - x),
+    height: Math.max(1, Math.min(image.height, Math.ceil(rect.y + rect.height)) - y)
+  };
+}
+
+// Longest run of true entries, allowing short gaps: [start, end) or null.
+function longestRun(flags, maxGap) {
+  let best = null;
+  let start = -1;
+  let lastTrue = -1;
+  for (let i = 0; i <= flags.length; i++) {
+    if (i < flags.length && flags[i]) {
+      if (start < 0 || i - lastTrue > maxGap) start = i;
+      lastTrue = i;
+      if (!best || lastTrue + 1 - start > best[1] - best[0]) best = [start, lastTrue + 1];
+    }
+  }
+  return best;
+}
+
+// Where the map sits in a screenshot of turbli.com: the band of rows tinted
+// by turbulence colour, even Turbli's palest blue. Page text is grey and
+// links are too sparse to form a band. The band keeps the full width, since
+// the map spans a phone's width and parts of it may be calm and white.
+// Returns a padded rectangle in natural px, or null when the band covers most
+// of the image anyway.
+function colourBounds(image) {
+  const step = Math.max(1, Math.round(Math.max(image.width, image.height) / 400));
+  const cols = Math.ceil(image.width / step);
+  const rows = Math.ceil(image.height / step);
+  const tinted = [];
+  for (let r = 0; r < rows; r++) {
+    let count = 0;
+    for (let c = 0; c < cols; c++) {
+      const i = ((r * step) * image.width + c * step) * 4;
+      const chroma = (Math.max(image.data[i], image.data[i + 1], image.data[i + 2])
+        - Math.min(image.data[i], image.data[i + 1], image.data[i + 2])) / 255;
+      if (chroma > 0.1) count++;
+    }
+    tinted.push(count >= Math.max(2, cols * 0.02));
+  }
+  const run = longestRun(tinted, Math.ceil(rows * 0.05));
+  if (!run) return null;
+  const pad = 0.05 * (run[1] - run[0]) * step;
+  const rect = clampRect({ x: 0, y: run[0] * step - pad, width: image.width, height: (run[1] - run[0]) * step + 2 * pad }, image);
+  return rect.height < 0.8 * image.height ? rect : null;
+}
+
+// Maps points through a fit into image px; returns the ones inside rect.
+function pointsInside(points, fit, rect) {
+  const kept = [];
+  const cos = Math.cos(fit.theta) * fit.a;
+  const sin = Math.sin(fit.theta) * fit.a;
+  for (let i = 0; i < points.length; i += 2) {
+    const u = cos * points[i] - sin * points[i + 1] + fit.bx;
+    const v = sin * points[i] + cos * points[i + 1] + fit.by;
+    if (u >= rect.x && v >= rect.y && u < rect.x + rect.width && v < rect.y + rect.height) kept.push(points[i], points[i + 1], u, v);
+  }
+  return kept;
+}
+
+function shiftFit(fit, dx, dy, k = 1) {
+  return { ...fit, a: fit.a * k, bx: (fit.bx + dx) * k, by: (fit.by + dy) * k };
+}
+
+function withMatch(fit, map) {
+  const match = (fit.score - map.baseline) / (1 - map.baseline);
+  return { ...fit, match, ok: match >= AUTOFIT.minMatch };
+}
+
+// Searches near `init` (a fit in natural px): the outlines that fall inside
+// the image under init, against the image cropped to their footprint.
+function localFit(image, points, init) {
+  const inside = pointsInside(points, init, { x: 0, y: 0, width: image.width, height: image.height });
+  if (inside.length / 4 < 40) return null;
+  let minU = Infinity, minV = Infinity, maxU = -Infinity, maxV = -Infinity;
+  const model = [];
+  for (let i = 0; i < inside.length; i += 4) {
+    model.push(inside[i], inside[i + 1]);
+    minU = Math.min(minU, inside[i + 2]); maxU = Math.max(maxU, inside[i + 2]);
+    minV = Math.min(minV, inside[i + 3]); maxV = Math.max(maxV, inside[i + 3]);
+  }
+  const pad = 0.15 * Math.max(maxU - minU, maxV - minV);
+  const rect = clampRect({ x: minU - pad, y: minV - pad, width: maxU - minU + 2 * pad, height: maxV - minV + 2 * pad }, image);
+  const map = scoreImage(cropImage(image, rect), AUTOFIT.fineSize, AUTOFIT.fineCap);
+  const pts = Float64Array.from(model);
+  const start = shiftFit(init, -rect.x, -rect.y, map.pxPerNatural);
+  // Exhaustive search over scale (about the footprint's centre) and translation.
+  const centre = { x: ((minU + maxU) / 2 - rect.x) * map.pxPerNatural, y: ((minV + maxV) / 2 - rect.y) * map.pxPerNatural };
+  const reach = Math.round(AUTOFIT.localShift * Math.max(map.width, map.height));
+  // The few best fits so far, best first.
+  const candidates = [];
+  const keep = fit => {
+    if (candidates.length === 3 && fit.score <= candidates[2].score) return;
+    candidates.push(fit);
+    candidates.sort((p, q) => q.score - p.score);
+    candidates.length = Math.min(candidates.length, 3);
+  };
+  for (let s = 0; s < AUTOFIT.localScaleSteps; s++) {
+    const f = Math.pow(AUTOFIT.localScale, (2 * s) / (AUTOFIT.localScaleSteps - 1) - 1);
+    const scaled = { ...start, a: start.a * f, bx: centre.x - f * (centre.x - start.bx), by: centre.y - f * (centre.y - start.by) };
+    for (let dy = -reach; dy <= reach; dy += 1) {
+      for (let dx = -reach; dx <= reach; dx += 1) {
+        const fit = { ...scaled, bx: scaled.bx + dx, by: scaled.by + dy };
+        fit.score = meanScore(map, pts, fit);
+        keep(fit);
+      }
+    }
+  }
+  let best = null;
+  for (const candidate of candidates) {
+    const fit = refineFit(map, pts, candidate);
+    if (!best || fit.score > best.score) best = fit;
+  }
+  const k = 1 / map.pxPerNatural;
+  return { ...withMatch(best, map), a: best.a * k, bx: best.bx * k + rect.x, by: best.by * k + rect.y };
+}
+
+// Exhaustive search over scale and translation, then refinement, for every
+// projection, within rect (the map's part of the image).
+async function globalFit(image, models, rect, onProgress) {
+  const cropped = cropImage(image, rect);
+  const coarse = scoreImage(cropped, AUTOFIT.coarseSize, AUTOFIT.coarseCap);
+  const fine = scoreImage(cropped, AUTOFIT.fineSize, AUTOFIT.fineCap);
   let best = null;
   for (const [index, model] of models.entries()) {
     onProgress(index / models.length, model.projection);
@@ -231,13 +399,29 @@ async function autofitImage(image, models, onProgress = () => {}) {
     const starts = coarseSearch(coarse, model.points, AUTOFIT.candidatesPerProjection);
     const ratio = fine.pxPerNatural / coarse.pxPerNatural;
     for (const start of starts) {
-      const scaled = { ...start, a: start.a * ratio, bx: start.bx * ratio, by: start.by * ratio };
-      const fit = refineFit(fine, model.points, scaled);
+      const fit = refineFit(fine, model.points, shiftFit(start, 0, 0, ratio));
       if (!best || fit.score > best.score) best = { ...fit, projection: model.projection };
     }
   }
-  // Convert from fine-image pixels to natural image pixels.
   const k = 1 / fine.pxPerNatural;
-  const match = (best.score - fine.baseline) / (1 - fine.baseline);
-  return { ...best, a: best.a * k, bx: best.bx * k, by: best.by * k, match, ok: match >= AUTOFIT.minMatch };
+  return { ...withMatch(best, fine), a: best.a * k, bx: best.bx * k + rect.x, by: best.by * k + rect.y };
+}
+
+// models: [{ projection, points }]. image: ImageData of the map image or a
+// screenshot of turbli.com. init, when given, is the current alignment as a
+// fit in natural px with its projection; a good fit near it wins over a
+// global search. Returns the best fit in natural image px, with its
+// projection, its raw mean score, and its match: the score corrected for
+// chance, so a map dense with borders cannot pass with outlines that merely
+// land near some line.
+async function autofitImage(image, models, onProgress = () => {}, init = null) {
+  const initModel = init && models.find(model => model.projection === init.projection);
+  if (initModel) {
+    onProgress(0, init.projection);
+    await new Promise(resolve => setTimeout(resolve));
+    const fit = localFit(image, initModel.points, init);
+    if (fit?.ok) return { ...fit, projection: init.projection, local: true };
+  }
+  const rect = colourBounds(image) || { x: 0, y: 0, width: image.width, height: image.height };
+  return globalFit(image, models, rect, onProgress);
 }

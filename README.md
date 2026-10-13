@@ -83,18 +83,19 @@ and the browser colours it with Turbli's own scale.
 
 ### Autofit
 
-Autofit aligns the wireframe with a map image by truncated chamfer matching:
+Autofit aligns the wireframe with a map image, either a Turbli map or a phone screenshot of turbli.com, by truncated chamfer matching:
 
-1. Dark, unsaturated pixels form the line mask. This keeps coastlines and borders and drops the coloured turbulence and the white background.
+1. Unsaturated pixels that are dark, or clearly darker than the brightest pixel within 2 px, form the line mask. The second test keeps the thin grey borders a browser leaves when it shrinks a Turbli map onto a phone screen; it demands near-zero chroma so the edges of Turbli's pale-blue turbulence do not pass for borders.
 2. A distance transform of the mask becomes a score map that is 1 on a line and falls to 0 a few pixels away.
-3. For Mercator, Miller and equirectangular outlines in turn, an exhaustive search over scale and translation on a small copy of the image finds candidate fits. The outlines must span 40% to 200% of the image, which stops them shrinking onto one dense patch of lines.
-4. A local pattern search over scale, rotation and translation refines each candidate on a larger copy.
-5. The best fit's mean score is corrected for chance by subtracting the score map's own mean, which is what a random placement would earn. Without this, a map dense with borders passes with outlines that merely land near some line.
-6. A match of at least 0.6 sets the overlay transform and the map projection, silently. A lower match leaves the alignment unchanged and puts a warning badge on the autofit button, whose tooltip gives the reason.
+3. When the image already has an alignment, either its own or one inherited from the last aligned image, autofit first searches near it. It keeps the outlines that fall inside the image under that alignment, crops the image to their footprint, searches scale within 25% and shift within 8% of the crop exhaustively, and refines the best candidates. This handles zoomed-in screenshots that a global search cannot place.
+4. Otherwise, or when the local fit fails, autofit searches globally. In a screenshot it first finds the band of rows tinted by turbulence colour, which is where the map sits, and ignores the page text around it. For Mercator, Miller and equirectangular outlines in turn, an exhaustive search over scale and translation on a small copy of that band finds candidate fits. The outlines must span 40% to 200% of it, which stops them shrinking onto one dense patch of lines.
+5. A local pattern search over scale, rotation and translation refines each candidate on a larger copy.
+6. The best fit's mean score is corrected for chance by subtracting the score map's own mean, which is what a random placement would earn. Without this, a map dense with borders passes with outlines that merely land near some line.
+7. A match of at least 0.6 sets the overlay transform and the map projection, silently. A lower match leaves the alignment unchanged and shows a warning.
 
-Autofit runs by itself when an image without its own saved alignment is pasted, dropped, or uploaded. On today's Turbli maps, correct region and image pairs match 0.74 to 0.96 and mismatched pairs 0.25 to 0.50.
+Autofit runs by itself when an image without its own saved alignment is pasted, dropped, or uploaded, so after aligning one screenshot by hand, later screenshots of the same view align themselves. Turbli's US and Europe maps match Mercator outlines and its World map matches Miller outlines. Select the region the image shows before running autofit.
 
-Turbli's US and Europe maps match Mercator outlines and its World map matches Miller outlines. Select the region the image shows before running autofit.
+Measured on Android-sized (1082 x 2402) screenshots of turbli.com's US, Europe and World pages, the outlines land within 0.5 to 1.1 px of ground truth from a global search, and within 0.5 to 0.6 px from a manual alignment that was about 115 px off. On pinch-zoomed screenshots the global search fails and says so, while the local fit lands within 1.4 to 3.6 px. On the original Turbli maps, correct region and image pairs match 0.75 to 0.96 and mismatched pairs 0.28 to 0.52.
 
 ### Turbli runs
 
