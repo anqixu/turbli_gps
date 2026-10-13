@@ -5,12 +5,14 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import mimetypes
 import re
 import ssl
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -38,12 +40,20 @@ TURBLI_LAST_HOUR = 36
 # Cloudflare's browser integrity check rejects requests without a browser-like
 # User-Agent (error 1010); this one passes while still naming the app.
 TURBLI_USER_AGENT = "Mozilla/5.0 TurbliGPS/0.1"
-TURBLI_TIMEOUT_SECONDS = 10
+TURBLI_TIMEOUT_SECONDS = 30
 CATALOG_TTL_SECONDS = 600
 # turbli.com publishes run GTG_<date>_<HH> about two hours before HH:00Z and
 # labels its CAT_006 frame "Now", so forecast hours count from HH:00Z - 6 h.
 RUN_LABEL_LEAD = timedelta(hours=6)
 
+# The interactive map's data endpoint: one forecast hour of the global 1-degree
+# grid, all altitudes, as EDR x 100. file_name is the run's CAT hour, e.g. 009.
+TURBLI_GRID_URL = f"{TURBLI_BASE_URL}/maps/interactive-turbulence-map/get_forecast_hour/"
+TURBLI_AIRPORTS_URL = f"{TURBLI_BASE_URL}/getAirports/"
+# The page that lists the current run; any region's page names the same run.
+GRID_CATALOG_REGION = "us"
+
+AIRPORT_RE = re.compile(r"(?:^|,)([^#,]*)#[^#]*#([A-Z0-9]{3})#[A-Z0-9]*#(-?\d+(?:\.\d+)?)#(-?\d+(?:\.\d+)?)#")
 MAP_PAGE_FRAME_RE = re.compile(r"/databases/GTG_(\d{8})_(\d{2})/figures/CAT_(\d{3})")
 MAP_PAGE_ALTITUDES_RE = re.compile(r"altitudes_ft\s*=\s*\(\"\[([\d,\s]+)\]\"\)")
 CLOUDFLARE_BLOCK_MARKERS = (b"Attention Required! | Cloudflare", b"Just a moment...", b"error code: 10")
@@ -182,8 +192,10 @@ def _read_url(request: urllib.request.Request, context: ssl.SSLContext | None = 
         return HttpBody(response.headers.get_content_type(), response.read())
 
 
-def http_get(url: str) -> HttpBody:
-    request = urllib.request.Request(url, headers={"User-Agent": TURBLI_USER_AGENT})
+def http_get(url: str, form: dict | None = None) -> HttpBody:
+    """GETs url, or POSTs form as application/x-www-form-urlencoded when given."""
+    data = urllib.parse.urlencode(form).encode("ascii") if form is not None else None
+    request = urllib.request.Request(url, data=data, headers={"User-Agent": TURBLI_USER_AGENT})
     try:
         try:
             return _read_url(request)
@@ -197,6 +209,40 @@ def http_get(url: str) -> HttpBody:
         raise describe_http_error(exc) from exc
     except (urllib.error.URLError, OSError) as exc:
         raise TurbliFetchError(f"offline or network error: {exc}") from exc
+
+
+def encode_grid(body: dict, altitude_key_suffix: str) -> dict:
+    """Packs one altitude of a get_forecast_hour/ response into a compact grid.
+
+    The response holds (rows, cols) arrays: lat (south row first), lon (west
+    column first), and cat_<lead>_<altitude> values in EDR x 100. Values become
+    one byte each, row-major, base64 encoded.
+    """
+    lat, lon = body["lat"], body["lon"]
+    key = next((key for key in body if key.startswith("cat_") and key.endswith(altitude_key_suffix)), None)
+    if key is None:
+        raise TurbliFetchError(f"Turbli grid has no {altitude_key_suffix.strip('_')} ft data")
+    values = bytearray()
+    for row in body[key]:
+        for value in row:
+            number = float(value) if value is not None else 0.0
+            values.append(0 if math.isnan(number) else min(255, max(0, round(number))))
+    return {
+        "lat0": float(lat[0][0]),
+        "lon0": float(lon[0][0]),
+        "step": float(lat[1][0]) - float(lat[0][0]),
+        "rows": len(lat),
+        "cols": len(lat[0]),
+        "values": base64.b64encode(bytes(values)).decode("ascii"),
+    }
+
+
+def parse_airports(text: str) -> dict[str, dict]:
+    """Parses getAirports/ (City#Name#IATA#ICAO#lat#lon#n, comma separated)."""
+    return {
+        code: {"code": code, "name": city.strip(), "lat": float(lat), "lon": float(lon)}
+        for city, code, lat, lon in AIRPORT_RE.findall(text)
+    }
 
 
 def parse_altitude(value: object) -> int:
@@ -315,16 +361,28 @@ class TurbliApp:
         now: datetime | None = None,
         lead_hours: int = 0,
     ) -> dict:
+        frames = self.latest_frame_candidates(altitude_feet, region, now, lead_hours)
+        return self.first_available(frames, lambda frame: self.download_frame(frame, altitude_feet, region, force))
+
+    def fetch_turbli_grid(self, payload: dict, now: datetime | None = None) -> dict:
+        altitude_feet = parse_altitude(payload.get("altitudeFeet"))
+        lead_hours = parse_lead_hours(payload.get("leadHours"))
+        force = bool(payload.get("force"))
+        frames = self.latest_frame_candidates(altitude_feet, GRID_CATALOG_REGION, now, lead_hours)
+        return self.first_available(frames, lambda frame: self.download_grid(frame, altitude_feet, lead_hours, force))
+
+    def first_available(self, frames: Iterator[TurbliFrame], download) -> dict:
+        """Returns download(frame) for the first frame Turbli serves."""
         errors = []
-        for frame in self.latest_frame_candidates(altitude_feet, region, now, lead_hours):
+        for frame in frames:
             try:
-                return self.download_frame(frame, altitude_feet, region, force)
+                return download(frame)
             except TurbliFetchError as exc:
                 errors.append(f"{frame.database} CAT_{frame.hour}: {exc}")
                 if exc.blocked:
                     break
         detail = "; ".join(errors) or "no candidate frames"
-        raise ValueError(f"could not fetch a recent Turbli image: {detail}")
+        raise ValueError(f"could not fetch recent Turbli data: {detail}")
 
     def latest_frame_candidates(
         self,
@@ -404,12 +462,90 @@ class TurbliApp:
         self.activate_source(source)
         return {**source, "cacheHit": False}
 
+    def download_grid(self, frame: TurbliFrame, altitude_feet: int, lead_hours: int, force: bool = False) -> dict:
+        """Downloads one forecast hour of the global grid and stores every altitude."""
+
+        def grid_source(altitude: int) -> dict:
+            name = f"{frame.database}_CAT_{frame.hour}_{altitude}.json"
+            return {
+                "id": f"turbli_grid:{frame.database}:{frame.hour}:{altitude}",
+                "family": "turbli_grid",
+                "kind": "turbli_grid",
+                "name": f"{frame.database} CAT_{frame.hour} grid",
+                "url": f"/grids/{name}",
+                "remoteUrl": TURBLI_GRID_URL,
+                "scrapeEpoch": time.time(),
+                "scrapeTime": local_iso(),
+                "forecastTime": compact_utc(frame.valid_time),
+                "altitudeText": f"{altitude:,} ft",
+                "turbli": {
+                    "date": frame.date,
+                    "run": frame.run,
+                    "hour": frame.hour,
+                    "leadHours": lead_hours,
+                    "altitudeFeet": altitude,
+                    "database": frame.database,
+                },
+            }
+
+        source = grid_source(altitude_feet)
+        existing = self.storage.read_sources().get("sources", {}).get(source["id"])
+        if not force and self.upload_exists(existing or source):
+            source = existing or source
+            self.activate_source(source)
+            return {**source, "cacheHit": True}
+
+        body = http_get(TURBLI_GRID_URL, {"hour": lead_hours, "file_name": frame.hour})
+        try:
+            data = json.loads(body.data)
+        except ValueError as exc:
+            raise TurbliFetchError(f"Turbli returned {body.content_type} that is not grid JSON") from exc
+        altitudes = sorted({int(key.rsplit("_", 1)[1]) for key in data if key.startswith("cat_")})
+        if altitude_feet not in altitudes:
+            raise TurbliFetchError(f"Turbli grid has no {altitude_feet} ft data")
+        for altitude in altitudes:
+            grid = encode_grid(data, f"_{altitude}")
+            path = self.storage.grids_dir / Path(grid_source(altitude)["url"]).name
+            path.write_text(json.dumps(grid), encoding="utf-8")
+        self.activate_source(source)
+        return {**source, "cacheHit": False}
+
+    def resolve_route(self, payload: dict) -> dict:
+        """Resolves "SEA-MUC" (any separator) to the two airports' names and positions."""
+        codes = re.findall(r"[A-Za-z0-9]{3}", str(payload.get("route") or ""))
+        if len(codes) != 2:
+            raise ValueError("route must name two IATA airport codes, like SEA-MUC")
+        airports = self.airports()
+        missing = [code.upper() for code in codes if code.upper() not in airports]
+        if missing:
+            raise ValueError(f"unknown airport code: {', '.join(missing)}")
+        return {"from": airports[codes[0].upper()], "to": airports[codes[1].upper()]}
+
+    def airports(self) -> dict[str, dict]:
+        """Turbli's airport list, downloaded once and kept under data/."""
+        with self._lock:
+            cached = self.storage.airports.read({})
+            if cached:
+                return cached
+            airports = parse_airports(http_get(TURBLI_AIRPORTS_URL).data.decode("utf-8", errors="replace"))
+            if not airports:
+                raise ValueError("Turbli's airport list was empty or unreadable")
+            self.storage.airports.write(airports)
+            return airports
+
     def turbli_source_id(self, frame: TurbliFrame, altitude_feet: int, region: str) -> str:
         return f"turbli_direct:{frame.database}:{frame.hour}:{altitude_feet}:{region}"
 
+    def stored_file(self, url: str) -> Path | None:
+        """Maps a /uploads/ or /grids/ URL to its file under data/."""
+        for prefix, directory in (("/uploads/", self.storage.uploads_dir), ("/grids/", self.storage.grids_dir)):
+            if url.startswith(prefix):
+                return directory / Path(url).name
+        return None
+
     def upload_exists(self, source: dict) -> bool:
-        url = source.get("url", "")
-        return url.startswith("/uploads/") and (self.storage.uploads_dir / Path(url).name).exists()
+        path = self.stored_file(source.get("url", ""))
+        return bool(path and path.exists())
 
     def has_cached_turbli_source(self, frame: TurbliFrame, altitude_feet: int, region: str) -> bool:
         existing = self.storage.read_sources().get("sources", {}).get(self.turbli_source_id(frame, altitude_feet, region))
@@ -465,6 +601,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(APP.save_transform(payload))
             elif parsed.path == "/api/turbli/fetch":
                 self.send_json(APP.fetch_turbli_image(payload), HTTPStatus.CREATED)
+            elif parsed.path == "/api/turbli/grid":
+                self.send_json(APP.fetch_turbli_grid(payload), HTTPStatus.CREATED)
+            elif parsed.path == "/api/route":
+                self.send_json(APP.resolve_route(payload))
             else:
                 self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
@@ -473,10 +613,18 @@ class Handler(BaseHTTPRequestHandler):
     def serve_file(self, path: str, head_only: bool = False) -> None:
         if path in ("", "/"):
             path = "/index.html"
-        if path.startswith("/uploads/"):
-            root = APP.storage.uploads_dir.resolve()
-            relative = path.removeprefix("/uploads/")
-            # Uploads are named by content hash, so they never change.
+        stored = next(
+            (
+                (directory, prefix)
+                for prefix, directory in (("/uploads/", APP.storage.uploads_dir), ("/grids/", APP.storage.grids_dir))
+                if path.startswith(prefix)
+            ),
+            None,
+        )
+        if stored:
+            root = stored[0].resolve()
+            relative = path.removeprefix(stored[1])
+            # Uploads are named by content hash and grids by run and hour, so they never change.
             cache_control = "public, max-age=31536000, immutable"
         else:
             root = APP.static.resolve()

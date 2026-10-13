@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import tempfile
 import unittest
 import urllib.error
@@ -388,6 +389,65 @@ class PersistenceTests(unittest.TestCase):
             ):
                 app.fetch_turbli_image({"latest": True})
             self.assertEqual(mocked.call_count, 2)
+
+
+def _grid_response(lead_hours: int = 0):
+    """Fake get_forecast_hour/ body: a 2 x 3 grid at two altitudes, south row first."""
+    lat = [[-90.0, -90.0, -90.0], [-89.0, -89.0, -89.0]]
+    lon = [[-180.0, -179.0, -178.0], [-180.0, -179.0, -178.0]]
+    body = {
+        "lon": lon,
+        "lat": lat,
+        f"cat_{lead_hours}_33000": [[0.0, 12.4, 40.0], [3.0, float("nan"), 300.0]],
+        f"cat_{lead_hours}_36000": [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]],
+    }
+    return _fake_jpeg_response(json.dumps(body).encode(), "text/html")
+
+
+class GridAndRouteTests(unittest.TestCase):
+    def test_grid_fetch_stores_every_altitude_and_reuses_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = TurbliApp(Path(tmp))
+            routes = {
+                "/maps/us-turbulence-map/": lambda: _fake_jpeg_response(MAP_PAGE.encode(), "text/html"),
+                "get_forecast_hour": lambda: _grid_response(3),
+            }
+            with patch("urllib.request.urlopen", side_effect=_router(routes)) as mocked:
+                source = app.fetch_turbli_grid({"altitudeFeet": 33000, "leadHours": 3})
+                other_altitude = app.fetch_turbli_grid({"altitudeFeet": 36000, "leadHours": 3})
+            grid_request = mocked.call_args_list[1].args[0]
+            self.assertEqual(mocked.call_count, 2)
+            self.assertEqual(grid_request.get_method(), "POST")
+            self.assertEqual(grid_request.data, b"hour=3&file_name=009")
+            self.assertEqual(source["kind"], "turbli_grid")
+            self.assertEqual(source["forecastTime"], "2026-10-13T09:00:00Z")
+            self.assertFalse(source["cacheHit"])
+            self.assertTrue(other_altitude["cacheHit"])
+            grid = json.loads((app.storage.grids_dir / Path(source["url"]).name).read_text())
+            self.assertEqual(
+                {key: grid[key] for key in ("lat0", "lon0", "step", "rows", "cols")},
+                {"lat0": -90.0, "lon0": -180.0, "step": 1.0, "rows": 2, "cols": 3},
+            )
+            # EDR x 100, rounded and clamped to a byte; missing values become 0.
+            self.assertEqual(list(base64.b64decode(grid["values"])), [0, 12, 40, 3, 0, 255])
+            self.assertEqual(app.read_state()["sources"]["activeSourceId"], other_altitude["id"])
+
+    def test_route_resolves_airports_and_caches_the_list(self):
+        airports = (
+            "Seattle#Seattle Tacoma International Airport#SEA#KSEA#47.447943#-122.310276#1000,"
+            "Munich#Munich Airport, Franz Josef Strauss#MUC#EDDM#48.353802#11.7861#1000"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            app = TurbliApp(Path(tmp))
+            routes = {"getAirports": lambda: _fake_jpeg_response(airports.encode(), "text/html")}
+            with patch("urllib.request.urlopen", side_effect=_router(routes)) as mocked:
+                route = app.resolve_route({"route": " sea - muc "})
+                self.assertEqual(TurbliApp(Path(tmp)).resolve_route({"route": "MUC SEA"})["from"]["code"], "MUC")
+                with self.assertRaisesRegex(ValueError, "XXX"):
+                    app.resolve_route({"route": "SEA-XXX"})
+            self.assertEqual(mocked.call_count, 1)
+            self.assertEqual(route["from"], {"code": "SEA", "name": "Seattle", "lat": 47.447943, "lon": -122.310276})
+            self.assertEqual(route["to"]["code"], "MUC")
 
 
 if __name__ == "__main__":

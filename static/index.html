@@ -12,8 +12,10 @@
         <div id="map" class="map">
           <div id="mapPlane" class="map-plane">
             <div id="worldLayer" class="world-layer">
+              <canvas id="gridCanvas" class="grid-canvas" hidden></canvas>
               <svg id="mapSvg" class="map-svg" viewBox="0 0 1000 620" aria-label="Map outline"></svg>
               <img id="overlayImage" class="overlay-image" alt="">
+              <svg id="routeSvg" class="map-svg route-svg" viewBox="0 0 1000 620" aria-label="Flight route"></svg>
               <div id="accuracyRing" class="accuracy-ring" hidden></div>
               <div id="altitudeRing" class="altitude-ring" hidden></div>
             </div>
@@ -31,6 +33,7 @@
           <button id="fitButton" class="icon-button" type="button" aria-label="Reset map" title="Reset map">🔄</button>
           <button id="turbliFetchButton" class="icon-button" type="button" aria-label="Fetch latest Turbli image" title="Fetch latest Turbli image">☁️</button>
           <button id="uploadButton" class="icon-button" type="button" aria-label="Paste or upload image" title="Paste or upload image">📋</button>
+          <button id="autofitButton" class="icon-button" type="button" aria-label="Autofit outlines to image" title="Autofit outlines to image">🎯</button>
           <input id="uploadInput" class="visually-hidden" type="file" accept="image/*">
         </div>
         <div class="panel-content">
@@ -50,7 +53,19 @@
               <select id="regionSelect">
                 <option value="us">United States</option>
                 <option value="europe">Europe</option>
+                <option value="asia">Asia</option>
+                <option value="natl">North Atlantic</option>
                 <option value="world">World</option>
+                <option value="route">Route</option>
+              </select>
+            </label>
+            <label>Route
+              <input id="routeInput" type="text" placeholder="SEA-MUC" autocomplete="off" spellcheck="false" autocapitalize="characters">
+            </label>
+            <label>Data
+              <select id="fetchKindSelect">
+                <option value="grid">Turbulence grid (any region)</option>
+                <option value="image">Map image (US, Europe, World)</option>
               </select>
             </label>
             <label>Altitude
@@ -111,6 +126,9 @@
         </div>
       </aside>
     </main>
+    <script src="/geo.js"></script>
+    <script src="/grid.js"></script>
+    <script src="/autofit.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

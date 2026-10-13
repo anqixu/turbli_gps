@@ -2,12 +2,30 @@ const IDENTITY_TRANSFORM = { x: 0, y: 0, scale: 1, rotation: 0 };
 // Map units: the SVG viewBox, which every layer shares.
 const MAP_WIDTH = 1000;
 const MAP_HEIGHT = 620;
+// Overlay images are laid out 500 map units wide before their own transform.
+const OVERLAY_BASE_WIDTH = 500;
+// View extents as [minLon, minLat, maxLon, maxLat]. The route region's extent
+// comes from the route itself.
+const REGIONS = {
+  us: { file: "us-states.geojson", bbox: [-127, 22, -64, 51] },
+  europe: { file: "europe.geojson", bbox: [-25, 30, 50, 72] },
+  asia: { file: "world.geojson", bbox: [60, -10, 150, 56] },
+  natl: { file: "world.geojson", bbox: [-130, 28, 28, 72] },
+  world: { file: "world.geojson", bbox: [-180, -75, 180, 82] },
+  route: { file: "world.geojson", bbox: null }
+};
+const IMAGE_REGIONS = ["us", "europe", "world"];
 const IS_ANDROID = /Android/i.test(navigator.userAgent);
 const SENSITIVITY = IS_ANDROID ? 0.7 : 1.0;
 
 const state = {
   geojson: null,
-  bounds: null,
+  geojsonCache: new Map(),
+  // Projection bounds and the fit of those bounds into the viewBox.
+  frame: null,
+  projection: "mercator",
+  grid: null,
+  route: null,
   mode: "view",
   imageTransform: { ...IDENTITY_TRANSFORM },
   viewTransform: loadViewTransform(),
@@ -36,6 +54,11 @@ const el = {
   panelHandle: document.querySelector("#panelHandle"),
   world: document.querySelector("#worldLayer"),
   svg: document.querySelector("#mapSvg"),
+  gridCanvas: document.querySelector("#gridCanvas"),
+  routeSvg: document.querySelector("#routeSvg"),
+  routeInput: document.querySelector("#routeInput"),
+  fetchKind: document.querySelector("#fetchKindSelect"),
+  autofit: document.querySelector("#autofitButton"),
   overlay: document.querySelector("#overlayImage"),
   dot: document.querySelector("#positionDot"),
   accuracy: document.querySelector("#accuracyRing"),
@@ -105,13 +128,17 @@ function activeTransform() {
   return state.mode === "view" ? state.viewTransform : state.imageTransform;
 }
 
-function setActiveTransform(next, autosave = true) {
-  const normalized = {
+function normalizeTransform(next) {
+  return {
     x: Number(next.x) || 0,
     y: Number(next.y) || 0,
     scale: clampScale(Number(next.scale) || 1),
     rotation: Number(next.rotation) || 0
   };
+}
+
+function setActiveTransform(next, autosave = true) {
+  const normalized = normalizeTransform(next);
   if (state.mode === "view") {
     state.viewTransform = normalized;
     saveViewTransform();
@@ -122,51 +149,41 @@ function setActiveTransform(next, autosave = true) {
   applyTransforms();
 }
 
-function project(lon, lat) {
-  const clamped = Math.max(-85.05112878, Math.min(85.05112878, lat));
-  const radius = 6378137;
-  return [
-    radius * lon * Math.PI / 180,
-    radius * Math.log(Math.tan(Math.PI / 4 + clamped * Math.PI / 360))
-  ];
+function regionBbox() {
+  if (el.region.value === "route" && state.route) return paddedBbox(state.route.points);
+  return REGIONS[el.region.value]?.bbox || REGIONS.world.bbox;
 }
 
-function visitCoordinates(geometry, callback) {
-  if (geometry.type === "Polygon") {
-    geometry.coordinates.forEach(ring => ring.forEach(([lon, lat]) => callback(lon, lat)));
-  } else if (geometry.type === "MultiPolygon") {
-    geometry.coordinates.forEach(poly => poly.forEach(ring => ring.forEach(([lon, lat]) => callback(lon, lat))));
-  }
-}
-
-function computeProjection() {
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  state.geojson.features.forEach(feature => {
-    visitCoordinates(feature.geometry, (lon, lat) => {
-      const [x, y] = project(lon, lat);
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x);
-      maxY = Math.max(maxY, y);
-    });
-  });
-  state.bounds = { minX, minY, maxX, maxY };
-}
-
-function toScreen(x, y) {
-  const b = state.bounds;
+// Fits the region's projected extent into the viewBox with a margin.
+function screenFrame(projection) {
+  const [minLon, minLat, maxLon, maxLat] = regionBbox();
+  const [minX, minY] = PROJECTIONS[projection].forward(minLon, minLat);
+  const [maxX, maxY] = PROJECTIONS[projection].forward(maxLon, maxLat);
   const pad = 24;
   const width = MAP_WIDTH - pad * 2;
   const height = MAP_HEIGHT - pad * 2;
-  const scale = Math.min(width / (b.maxX - b.minX), height / (b.maxY - b.minY));
-  const usedWidth = (b.maxX - b.minX) * scale;
-  const usedHeight = (b.maxY - b.minY) * scale;
-  const ox = pad + (width - usedWidth) / 2;
-  const oy = pad + (height - usedHeight) / 2;
-  return [ox + (x - b.minX) * scale, oy + (b.maxY - y) * scale, scale];
+  const scale = Math.min(width / (maxX - minX), height / (maxY - minY));
+  return {
+    projection,
+    minX,
+    maxY,
+    scale,
+    ox: pad + (width - (maxX - minX) * scale) / 2,
+    oy: pad + (height - (maxY - minY) * scale) / 2
+  };
+}
+
+// [lon, lat] degrees to [x, y] map units (y down).
+function lonLatToScreen(lon, lat, frame = state.frame) {
+  const [x, y] = PROJECTIONS[frame.projection].forward(lon, lat);
+  return [frame.ox + (x - frame.minX) * frame.scale, frame.oy + (frame.maxY - y) * frame.scale];
+}
+
+function screenToLonLat(sx, sy, frame = state.frame) {
+  return PROJECTIONS[frame.projection].inverse(
+    frame.minX + (sx - frame.ox) / frame.scale,
+    frame.maxY - (sy - frame.oy) / frame.scale
+  );
 }
 
 function mapUnitsToPixels(x, y) {
@@ -211,7 +228,7 @@ function geometryToPath(geometry) {
   const parts = [];
   const drawRing = ring => {
     ring.forEach(([lon, lat], index) => {
-      const [x, y] = toScreen(...project(lon, lat));
+      const [x, y] = lonLatToScreen(lon, lat);
       parts.push(`${index === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`);
     });
     parts.push("Z");
@@ -221,16 +238,22 @@ function geometryToPath(geometry) {
   return parts.join(" ");
 }
 
+function svgElement(name, attributes) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+  for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, value);
+  return node;
+}
+
 function renderMap() {
-  computeProjection();
+  state.frame = screenFrame(state.projection);
   el.svg.innerHTML = "";
   state.geojson.features.forEach(feature => {
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("class", "state");
-    path.setAttribute("d", geometryToPath(feature.geometry));
+    const path = svgElement("path", { class: "state", d: geometryToPath(feature.geometry) });
     path.dataset.name = feature.properties?.name || "";
     el.svg.appendChild(path);
   });
+  drawRoute();
+  drawGrid();
   applyTransforms();
   if (state.lastFix) updatePosition(state.lastFix);
 }
@@ -255,8 +278,39 @@ function updateMapPlaneSize() {
   el.plane.style.height = `${state.planeSize.height}px`;
 }
 
+function drawRoute() {
+  el.routeSvg.innerHTML = "";
+  if (!state.route) return;
+  const points = state.route.points.map(([lon, lat]) => lonLatToScreen(lon, lat));
+  const d = points.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  el.routeSvg.appendChild(svgElement("path", { class: "route-line", d }));
+  for (const [[x, y], airport] of [[points[0], state.route.from], [points[points.length - 1], state.route.to]]) {
+    el.routeSvg.appendChild(svgElement("circle", { class: "route-airport", cx: x, cy: y, r: 4 }));
+    const label = svgElement("text", { class: "route-label", x: x + 7, y: y - 7 });
+    label.textContent = airport.code;
+    el.routeSvg.appendChild(label);
+  }
+}
+
+function drawGrid() {
+  const active = Boolean(state.grid);
+  el.app.classList.toggle("grid-active", active);
+  el.gridCanvas.hidden = !active;
+  if (active) renderGrid(el.gridCanvas, state.grid, MAP_WIDTH, MAP_HEIGHT, (sx, sy) => screenToLonLat(sx, sy));
+}
+
+async function setProjection(projection) {
+  if (!PROJECTIONS[projection] || projection === state.projection) return;
+  state.projection = projection;
+  renderMap();
+}
+
+function hasImage() {
+  return el.overlay.style.display === "block" && state.overlayNatural.width > 0;
+}
+
 function overlayBaseSizeUnits() {
-  const width = 500;
+  const width = OVERLAY_BASE_WIDTH;
   const natural = state.overlayNatural;
   const ratio = natural.width > 0 && natural.height > 0 ? natural.height / natural.width : 0.62;
   return {
@@ -331,10 +385,22 @@ async function setSource(source) {
   el.forecast.textContent = source.forecastTime || "--";
   el.sourceAltitude.textContent = source.altitudeText || "--";
 
+  if (source.kind === "turbli_grid") {
+    clearOverlay();
+    el.pasteHint.hidden = true;
+    const response = await fetch(source.url);
+    if (!response.ok) throw new Error(`Turbli grid failed to load: ${response.status}`);
+    state.grid = decodeGrid(await response.json());
+    if (state.projection === "mercator") drawGrid();
+    else await setProjection("mercator");
+    return;
+  }
+  state.grid = null;
+  drawGrid();
+
   if (source.turbli?.region && source.turbli.region !== el.region.value) {
     el.region.value = source.turbli.region;
-    await loadMapData(source.turbli.region);
-    renderMap();
+    await selectRegion(source.turbli.region);
   }
 
   if (!isLoadableImageSource(source)) {
@@ -345,8 +411,10 @@ async function setSource(source) {
   el.overlay.src = source.url;
   el.overlay.style.display = "block";
   el.pasteHint.hidden = true;
-  state.imageTransform = chooseTransformForSource(source);
-  applyTransforms();
+  const saved = chooseTransformForSource(source);
+  state.imageTransform = normalizeTransform(saved);
+  if (saved.projection && saved.projection !== state.projection) await setProjection(saved.projection);
+  else applyTransforms();
 }
 
 function sourceUrl(source = state.activeSource) {
@@ -379,8 +447,8 @@ function projectedAccuracyRadius(c, sx, sy) {
   const latitudeFactor = Math.max(0.05, Math.cos(c.latitude * Math.PI / 180));
   const lonOffset = c.accuracy / (111320 * latitudeFactor);
   const latOffset = c.accuracy / 110540;
-  const [eastX, eastY] = toScreen(...project(c.longitude + lonOffset, c.latitude));
-  const [northX, northY] = toScreen(...project(c.longitude, c.latitude + latOffset));
+  const [eastX, eastY] = lonLatToScreen(c.longitude + lonOffset, c.latitude);
+  const [northX, northY] = lonLatToScreen(c.longitude, c.latitude + latOffset);
   const east = mapUnitsToPixels(eastX, eastY);
   const north = mapUnitsToPixels(northX, northY);
   const center = mapUnitsToPixels(sx, sy);
@@ -424,7 +492,7 @@ function updatePosition(position) {
   fields.coord.textContent = coords;
   fields.altitude.textContent = altitudeDisplayText(position);
 
-  const [sx, sy] = toScreen(...project(c.longitude, c.latitude));
+  const [sx, sy] = lonLatToScreen(c.longitude, c.latitude);
   const px = sx / MAP_WIDTH * 100;
   const py = sy / MAP_HEIGHT * 100;
   el.dot.hidden = false;
@@ -487,6 +555,10 @@ async function api(path, options = {}) {
 }
 
 async function fetchTurbliSource(force = false) {
+  const grid = el.fetchKind.value === "grid";
+  if (!grid && !IMAGE_REGIONS.includes(el.region.value)) {
+    throw new Error("Turbli publishes map images only for the US, Europe and World; use the turbulence grid");
+  }
   const payload = {
     latest: true,
     altitudeFeet: Number(el.altitudeFetch.value),
@@ -494,13 +566,106 @@ async function fetchTurbliSource(force = false) {
     region: el.region.value,
     force
   };
-  setStatus("Fetching latest Turbli image...");
-  const source = await api("/api/turbli/fetch", {
+  const label = grid ? "Turbli grid" : "Turbli image";
+  setStatus(`Fetching ${label}...`);
+  const source = await api(grid ? "/api/turbli/grid" : "/api/turbli/fetch", {
     method: "POST",
     body: JSON.stringify(payload)
   });
   await loadState();
-  setStatus(source.cacheHit ? "Turbli image loaded from cache" : "Turbli image fetched and cached");
+  setStatus(`${label} ${source.cacheHit ? "loaded from cache" : "fetched and cached"}, valid ${source.forecastTime}`);
+}
+
+async function setRoute(text) {
+  const route = await api("/api/route", { method: "POST", body: JSON.stringify({ route: text }) });
+  state.route = { text, from: route.from, to: route.to, points: greatCircle(route.from, route.to) };
+  try {
+    localStorage.setItem("turbliGpsRoute", JSON.stringify({ text, from: route.from, to: route.to }));
+  } catch {}
+  el.region.value = "route";
+  await selectRegion("route");
+  setStatus(`Route ${route.from.code} (${route.from.name}) to ${route.to.code} (${route.to.name})`);
+}
+
+function loadRoute() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("turbliGpsRoute") || "null");
+    return saved && { ...saved, points: greatCircle(saved.from, saved.to) };
+  } catch {
+    return null;
+  }
+}
+
+// Outline points, in map units, as the given projection would draw them:
+// rings densified every few units, clipped to the viewBox, then thinned.
+function modelPoints(projection) {
+  const frame = screenFrame(projection);
+  const points = [];
+  const add = (x, y) => {
+    if (x >= 0 && y >= 0 && x <= MAP_WIDTH && y <= MAP_HEIGHT) points.push(x, y);
+  };
+  const visitRing = ring => {
+    let previous = null;
+    for (const [lon, lat] of ring) {
+      const point = lonLatToScreen(lon, lat, frame);
+      if (previous) {
+        const steps = Math.max(1, Math.ceil(Math.hypot(point[0] - previous[0], point[1] - previous[1]) / 3));
+        for (let i = 1; i <= steps; i++) {
+          add(previous[0] + (point[0] - previous[0]) * i / steps, previous[1] + (point[1] - previous[1]) * i / steps);
+        }
+      }
+      previous = point;
+    }
+  };
+  for (const feature of state.geojson.features) {
+    const geometry = feature.geometry;
+    if (geometry.type === "Polygon") geometry.coordinates.forEach(visitRing);
+    if (geometry.type === "MultiPolygon") geometry.coordinates.forEach(poly => poly.forEach(visitRing));
+  }
+  const stride = Math.max(1, Math.ceil(points.length / 2 / 2500));
+  const thinned = [];
+  for (let i = 0; i < points.length; i += 2 * stride) thinned.push(points[i], points[i + 1]);
+  return Float64Array.from(thinned);
+}
+
+// Converts a fit (natural image px = a * R(theta) * map units + b) into the
+// overlay transform, whose image centre sits at the viewBox centre plus (x, y).
+function transformFromFit(fit, width, height) {
+  const unitsPerPixel = OVERLAY_BASE_WIDTH / width;
+  const [cx, cy] = rotateScale(width / 2 - fit.bx, height / 2 - fit.by, -fit.theta, 1 / fit.a);
+  return normalizeTransform({
+    x: cx - MAP_WIDTH / 2,
+    y: cy - MAP_HEIGHT / 2,
+    scale: 1 / (fit.a * unitsPerPixel),
+    rotation: -fit.theta * 180 / Math.PI
+  });
+}
+
+async function autofitOverlay() {
+  if (!hasImage()) {
+    setStatus("Paste, drop, or upload a map image first");
+    return;
+  }
+  const { naturalWidth: width, naturalHeight: height } = el.overlay;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(el.overlay, 0, 0);
+  const image = ctx.getImageData(0, 0, width, height);
+  const models = Object.keys(PROJECTIONS).map(projection => ({ projection, points: modelPoints(projection) }));
+  const fit = await autofitImage(image, models, (_, projection) => {
+    setStatus(`Autofitting ${PROJECTIONS[projection].label} outlines...`);
+  });
+  if (!fit.ok) {
+    setStatus(`Autofit failed (match ${fit.score.toFixed(2)}): pick the region the image shows, or align by hand`);
+    return;
+  }
+  state.imageTransform = transformFromFit(fit, width, height);
+  if (fit.projection !== state.projection) await setProjection(fit.projection);
+  else applyTransforms();
+  scheduleAlignmentSave();
+  setStatus(`Autofit matched ${PROJECTIONS[fit.projection].label} outlines (match ${fit.score.toFixed(2)})`);
 }
 
 async function loadState() {
@@ -546,7 +711,7 @@ async function saveAlignment() {
         sourceId: state.activeSource.id,
         family: state.activeSource.family,
         fileHash: state.activeSource.fileHash,
-        transform: state.imageTransform
+        transform: { ...state.imageTransform, projection: state.projection }
       })
     });
     setStatus("Alignment saved");
@@ -631,7 +796,7 @@ function updateGesture(event) {
 function bindMapGestures() {
   el.map.addEventListener("contextmenu", event => event.preventDefault());
   el.map.addEventListener("pointerdown", event => {
-    if (state.mode === "image" && !state.activeSource) {
+    if (state.mode === "image" && !hasImage()) {
       setStatus("Paste, drop, or upload an image first");
       return;
     }
@@ -659,7 +824,7 @@ function bindMapGestures() {
     });
   }
   el.map.addEventListener("wheel", event => {
-    if (state.mode === "image" && !state.activeSource) return;
+    if (state.mode === "image" && !hasImage()) return;
     event.preventDefault();
     const current = activeTransform();
     const zoom = Math.exp(-event.deltaY * 0.0015);
@@ -805,17 +970,26 @@ function bindEvents() {
   el.turbliFetch.addEventListener("click", () => {
     fetchTurbliSource().catch(error => setStatus(error.message));
   });
+  el.autofit.addEventListener("click", () => {
+    autofitOverlay().catch(error => setStatus(`Autofit failed: ${error.message}`));
+  });
   el.region.addEventListener("change", () => {
-    setStatus(`Switching map to ${el.region.value}...`);
-    loadMapData(el.region.value)
-      .then(() => {
-        renderMap();
-        setStatus(`Map switched to ${el.region.value}`);
-      })
+    if (el.region.value === "route" && !state.route) setStatus("Type a route like SEA-MUC");
+    selectRegion(el.region.value)
+      .then(() => setStatus(`Map switched to ${el.region.selectedOptions[0].textContent}`))
       .catch(error => setStatus(error.message));
   });
+  el.routeInput.addEventListener("change", () => {
+    if (el.routeInput.value.trim()) setRoute(el.routeInput.value.trim()).catch(error => setStatus(error.message));
+  });
+  for (const input of [el.altitudeFetch, el.leadFetch]) {
+    input.addEventListener("change", () => {
+      if (state.activeSource?.kind === "turbli_grid") fetchTurbliSource().catch(error => setStatus(error.message));
+    });
+  }
   el.opacity.addEventListener("input", () => {
     el.overlay.style.opacity = el.opacity.value;
+    el.gridCanvas.style.opacity = el.opacity.value;
   });
   el.wireframe.addEventListener("input", () => {
     document.documentElement.style.setProperty("--wireframe-thickness", `${el.wireframe.value}px`);
@@ -823,6 +997,7 @@ function bindEvents() {
   
   // Set initial values
   el.overlay.style.opacity = el.opacity.value;
+  el.gridCanvas.style.opacity = el.opacity.value;
   document.documentElement.style.setProperty("--wireframe-thickness", `${el.wireframe.value}px`);
 
   for (const input of [el.scale, el.rotation, el.x, el.y]) {
@@ -848,19 +1023,33 @@ function bindEvents() {
   }
 }
 
-const MAP_FILES = { us: "us-states.geojson", europe: "europe.geojson", world: "world.geojson" };
+async function loadGeojson(file) {
+  if (!state.geojsonCache.has(file)) {
+    const response = await fetch(`/data/${file}`);
+    if (!response.ok) throw new Error(`Map outline failed to load: ${response.status}`);
+    state.geojsonCache.set(file, await response.json());
+  }
+  return state.geojsonCache.get(file);
+}
 
-async function loadMapData(region) {
-  const response = await fetch(`/data/${MAP_FILES[region] || MAP_FILES.us}`);
-  if (!response.ok) throw new Error(`Map outline failed to load: ${response.status}`);
-  state.geojson = await response.json();
+async function selectRegion(region) {
+  state.geojson = await loadGeojson((REGIONS[region] || REGIONS.us).file);
+  try {
+    localStorage.setItem("turbliGpsRegion", region);
+  } catch {}
+  renderMap();
 }
 
 async function start() {
   bindEvents();
-  await loadMapData(el.region.value);
+  state.route = loadRoute();
+  if (state.route) el.routeInput.value = state.route.text;
+  try {
+    const region = localStorage.getItem("turbliGpsRegion");
+    if (REGIONS[region]) el.region.value = region;
+  } catch {}
+  await selectRegion(el.region.value);
   await loadState();
-  renderMap();
   setStatus("Ready");
 }
 

@@ -113,6 +113,46 @@ input[type="text"] {
   vector-effect: non-scaling-stroke;
 }
 
+.grid-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* Over the turbulence grid, land is only tinted so the heatmap shows through. */
+.grid-active .state {
+  fill: rgba(32, 42, 49, 0.35);
+}
+
+.route-svg {
+  pointer-events: none;
+}
+
+.route-line {
+  fill: none;
+  stroke: #ff5fd2;
+  stroke-width: 2px;
+  stroke-dasharray: 7 4;
+  vector-effect: non-scaling-stroke;
+}
+
+.route-airport {
+  fill: #ff5fd2;
+  stroke: var(--bg);
+  stroke-width: 1.5px;
+  vector-effect: non-scaling-stroke;
+}
+
+.route-label {
+  fill: var(--text);
+  font: 600 14px system-ui, sans-serif;
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3px;
+}
+
 .overlay-image {
   position: absolute;
   top: 0;

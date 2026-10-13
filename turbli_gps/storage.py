@@ -43,9 +43,12 @@ class AppStorage:
         self.root = root
         self.data_dir = root / "data"
         self.uploads_dir = self.data_dir / "uploads"
+        self.grids_dir = self.data_dir / "grids"
         self.transforms = JsonStore(self.data_dir / "transforms.json")
         self.sources = JsonStore(self.data_dir / "sources.json")
+        self.airports = JsonStore(self.data_dir / "airports.json")
         self.uploads_dir.mkdir(parents=True, exist_ok=True)
+        self.grids_dir.mkdir(parents=True, exist_ok=True)
 
     def read_transforms(self) -> dict[str, Any]:
         return self.transforms.read({"families": {}, "uploads": {}})

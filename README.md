@@ -6,8 +6,10 @@ A dependency-light local web app for aligning Turbli turbulence forecast images 
 
 - Browser GPS watch with copyable latitude/longitude, altitude, and accuracy display.
 - US state outline map using Web Mercator.
+- Turbulence grid: Turbli's global clear-air turbulence (CAT) forecast drawn as a heatmap in the app's own projection, so it lines up exactly in any region.
+- Regions for the US, Europe, Asia, the North Atlantic, the world, and any flight route typed as two airport codes (for example `SEA-MUC`), drawn as a great circle.
 - Turbli image overlay with drag, scale, rotation, paste, drop, and file upload support.
-- One-click cloud fetch of the current Turbli clear-air turbulence (CAT) map for the chosen region, altitude, and lead time.
+- Autofit, which aligns the outlines with a pasted or fetched map image and picks the image's projection.
 - Local source and alignment persistence by image hash, source, and source family.
 - No external Python packages required for the core server or browser client.
 
@@ -69,6 +71,28 @@ sequenceDiagram
     Browser->>Browser: Load image and apply its saved alignment
 ```
 
+### Turbulence grid
+
+turbli.com's interactive map loads one forecast hour at a time from
+`POST /maps/interactive-turbulence-map/get_forecast_hour/` with form fields
+`hour` (lead time) and `file_name` (the run's CAT hour, for example `009`).
+The response is a global 1-degree grid (181 x 360, south row and west column
+first) of EDR x 100 at every altitude. The server stores each altitude as a
+byte array under `data/grids/`, so changing altitude needs no further download,
+and the browser colours it with Turbli's own scale.
+
+### Autofit
+
+Autofit aligns the wireframe with a map image by truncated chamfer matching:
+
+1. Dark, unsaturated pixels form the line mask. This keeps coastlines and borders and drops the coloured turbulence and the white background.
+2. A distance transform of the mask becomes a score map that is 1 on a line and falls to 0 a few pixels away.
+3. For Mercator, Miller and equirectangular outlines in turn, an exhaustive search over scale and translation on a small copy of the image finds candidate fits. The outlines must span 40% to 200% of the image, which stops them shrinking onto one dense patch of lines.
+4. A local pattern search over scale, rotation and translation refines each candidate on a larger copy.
+5. The best fit sets the overlay transform and the map projection. A mean score below 0.45 is reported as a failure and leaves the alignment unchanged.
+
+Turbli's US and Europe maps match Mercator outlines and its World map matches Miller outlines. Select the region the image shows before running autofit.
+
 ### Turbli runs
 
 Turbli serves its maps from `/databases/GTG_<date>_<HH>/figures/CAT_<hour>_<altitude>_<region>.jpg`.
@@ -110,7 +134,9 @@ Open `http://127.0.0.1:8765` in your browser.
 
 ## Controls
 
-- **Cloud:** fetches the Turbli CAT map for the selected region, altitude, and forecast lead time ("Now" to +24 h).
+- **Cloud:** fetches Turbli's turbulence grid, or its map image when Data is set to "Map image", for the selected altitude and forecast lead time ("Now" to +24 h). Changing altitude or lead time re-fetches the grid.
+- **Target:** autofits the outlines to the current image.
+- **Route:** type two airport codes, such as `SEA-MUC`, to draw the great circle and fit the view to it.
 - **Compass:** starts or stops browser GPS tracking.
 - **Reset:** returns the map view to its default position.
 - **Image:** toggles between aligning the image and moving the canvas.
@@ -123,7 +149,9 @@ Runtime data is written under `data/` and is intentionally ignored by git:
 
 - `data/uploads/` stores uploaded or fetched images.
 - `data/sources.json` tracks available image sources.
-- `data/transforms.json` stores overlay alignments.
+- `data/transforms.json` stores overlay alignments and their projection.
+- `data/grids/` stores turbulence grids, one file per run, forecast hour and altitude.
+- `data/airports.json` caches Turbli's airport list for route lookup.
 
 The app does not need secrets or API keys. Browser geolocation is handled locally and is not sent to any third-party service by this app.
 
