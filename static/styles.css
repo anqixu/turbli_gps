@@ -156,6 +156,17 @@ input[type="text"] {
   vector-effect: non-scaling-stroke;
 }
 
+.route-track {
+  stroke-width: 2.5px;
+  stroke-dasharray: none;
+}
+
+.route-previous {
+  stroke-width: 3px;
+  stroke-dasharray: none;
+  stroke-opacity: 0.4;
+}
+
 .route-airport {
   fill: #ff5fd2;
   stroke: var(--bg);

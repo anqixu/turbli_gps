@@ -8,6 +8,7 @@ A dependency-light local web app for aligning Turbli turbulence forecast images 
 - US state outline map using Web Mercator.
 - Turbulence grid: Turbli's global clear-air turbulence (CAT) forecast drawn as a heatmap in the app's own projection, so it lines up exactly in any region.
 - Regions for the US, Europe, Asia, the North Atlantic, the world, and any flight route typed as two airport codes (for example `SEA-MUC`), drawn as a great circle.
+- Flight lookup: type a flight number (for example `LH490`) to draw its filed route, its track so far, and, before departure, the previous day's actual track, from FlightAware's public flight page.
 - Turbli image overlay with drag, scale, rotation, paste, drop, and file upload support.
 - Autofit, which aligns the outlines with a pasted or fetched map image and picks the image's projection.
 - Local source and alignment persistence by image hash, source, and source family.
@@ -39,10 +40,12 @@ graph TD
 
     subgraph External [External Services]
         Turbli[Turbli.com (Images)]
+        FlightAware[FlightAware.com (Flights)]
     end
 
     UI <-->|JSON API / Static Files| HTTP
     App <-->|HTTPS GET| Turbli
+    App <-->|HTTPS GET| FlightAware
 ```
 
 ### Data Flow: Fetching Turbli Image
@@ -108,6 +111,16 @@ The following facts about that layout drive the fetch logic:
 - The map page names the current run, so a fetch normally costs one page request and one image request. When the page is unavailable, the server tries at most three run labels, newest first.
 - Cloudflare rejects requests without a browser-like `User-Agent` (error 1010) and blocks hotlinking from other origins, so images are fetched by the server rather than by the browser. If Cloudflare blocks the server, the error says so; paste the image from turbli.com instead.
 
+### Flight lookup
+
+Free flight trackers were tested for paths that are known before a flight. Flightradar24's API and AirNav Radar answer scripts with a Cloudflare challenge (HTTP 403). adsbdb, adsb.lol and OpenSky return only a callsign's two airports, not its path. FlightAware's public flight page needs no key and embeds the flight as JSON (`trackpollBootstrap`), so the server reads that:
+
+- `waypoints` is the filed flight plan decoded to positions, published hours before departure. FlightAware has filed routes for flights in FAA airspace (US departures and arrivals from the US). For others the flight plan names only the destination, the waypoints are a great circle, and the app draws its own great circle instead.
+- `track` holds the ADS-B positions flown so far.
+- `activityLog` lists the same flight number's recent flights. Before departure the server reads the latest arrived one, whose track shows the route the airline actually flies, which matters most when no route is filed. On 2026-10-16, Lufthansa 490 from Frankfurt to Seattle flew up to 330 km from the great circle.
+
+Pages are keyed by ICAO ident (`DLH490`). The server first asks FlightAware's search box (`/ajax/ignoreall/omnisearch/flight.rvt`) for the airline flight matching the typed number, skipping tail numbers such as `B-6123`, so a lookup costs two page requests, or three before departure. FlightAware, like Turbli, rejects requests without a browser-like `User-Agent`.
+
 ## Installation
 
 The core application has **no external dependencies** beyond Python 3 standard library.
@@ -140,7 +153,7 @@ Open `http://127.0.0.1:8765` in your browser.
 
 - **Cloud:** fetches Turbli's turbulence grid, or its map image when Data is set to "Map image", for the selected altitude and forecast lead time ("Now" to +24 h). Changing altitude or lead time re-fetches the grid. The status line shows download progress; Turbli sends no `Content-Length`, so the percentage is estimated from the previous download of the same kind.
 - **Target:** autofits the outlines to the current image. A badge on the button marks a failed fit; hover over it for the reason.
-- **Route:** type two airport codes, such as `SEA-MUC`, to draw the great circle and fit the view to it.
+- **Route or flight:** type two airport codes, such as `SEA-MUC`, to draw the great circle, or a flight number, such as `LH490`, to draw the flight's paths; either way the view fits to it. Text with a digit is a flight number. For a flight, the dashed line is the filed route (or the great circle when none is filed), the solid line is the track flown so far, and the faint line is the previous flight's track.
 - **Compass:** starts or stops browser GPS tracking; it turns green while tracking.
 - **Reset:** returns the map view to its default position.
 - **Image:** toggles between aligning the image and moving the canvas.
@@ -162,7 +175,7 @@ Runtime data is written under `data/` and is intentionally ignored by git:
 - `data/grids/` stores turbulence grids, one file per run, forecast hour and altitude.
 - `data/airports.json` caches Turbli's airport list for route lookup.
 
-The app does not need secrets or API keys. Browser geolocation is handled locally and is not sent to any third-party service by this app.
+The app does not need secrets or API keys. Flight lookups send only the flight number to FlightAware. Browser geolocation is handled locally and is not sent to any third-party service by this app.
 
 ## Tests
 

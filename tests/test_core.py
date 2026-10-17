@@ -102,6 +102,32 @@ def _router(routes: dict):
     return fake_urlopen
 
 
+def _flightaware_page(flight: dict | None) -> bytes:
+    """A FlightAware flight page reduced to its trackpollBootstrap script."""
+    flights = {"DLH490-1": flight} if flight else {"INVALID-1": {"unknown": True}}
+    return f"<script>var trackpollBootstrap = {json.dumps({'flights': flights})};</script>".encode()
+
+
+def _flightaware_flight(status: str, track: list | None, route: str = "SEA") -> dict:
+    return {
+        "ident": "DLH490",
+        "iataIdent": "LH490",
+        "flightStatus": status,
+        "origin": {"iata": "FRA", "icao": "EDDF", "friendlyLocation": "Frankfurt", "coord": [8.57, 50.03]},
+        "destination": {"iata": "SEA", "icao": "KSEA", "friendlyLocation": "Seattle, WA", "coord": [-122.31, 47.45]},
+        "gateDepartureTimes": {"scheduled": 1792399500, "estimated": None, "actual": 1792140300 if track else None},
+        "flightPlan": {"route": route},
+        "waypoints": [[8.57, 50.03], [-30.0, 62.0], [-122.31, 47.45]],
+        "track": [{"coord": coord, "alt": 350} for coord in track] if track else None,
+        "activityLog": {
+            "flights": [
+                {"flightStatus": "", "links": {"permanent": "/live/flight/DLH490/history/20261018/0855Z/EDDF/KSEA"}},
+                {"flightStatus": "arrived", "links": {"permanent": "/live/flight/DLH490/history/20261016/0855Z/EDDF/KSEA"}},
+            ]
+        },
+    }
+
+
 # Trimmed copy of the frame list on https://turbli.com/maps/us-turbulence-map/:
 # the page repeats the list inside its own substring() call.
 _FRAMES = "['/databases/GTG_20261013_06/figures/CAT_006', '/databases/GTG_20261013_06/figures/CAT_009']"
@@ -461,6 +487,70 @@ class GridAndRouteTests(unittest.TestCase):
             self.assertEqual(mocked.call_count, 1)
             self.assertEqual(route["from"], {"code": "SEA", "name": "Seattle", "lat": 47.447943, "lon": -122.310276})
             self.assertEqual(route["to"]["code"], "MUC")
+
+
+    def test_flight_maps_iata_number_and_adds_previous_track_before_departure(self):
+        search = {
+            "data": [
+                {"ident": "B-6123", "major_airline": "0", "might_be_a_tail": True},
+                {"ident": "DLH490", "major_airline": "1", "might_be_a_tail": False},
+            ]
+        }
+        upcoming = _flightaware_flight("", None)
+        previous = _flightaware_flight("arrived", [[8.6, 50.0], [-20.0, 64.0], [-122.3, 47.4]])
+        with tempfile.TemporaryDirectory() as tmp:
+            app = TurbliApp(Path(tmp))
+            routes = {
+                "omnisearch": lambda: _fake_jpeg_response(json.dumps(search).encode(), "application/json"),
+                "/history/20261016/": lambda: _fake_jpeg_response(_flightaware_page(previous), "text/html"),
+                "/live/flight/DLH490": lambda: _fake_jpeg_response(_flightaware_page(upcoming), "text/html"),
+            }
+            with patch("urllib.request.urlopen", side_effect=_router(routes)) as mocked:
+                flight = app.resolve_flight({"flight": " lh-490 "})
+            urls = [call.args[0].full_url for call in mocked.call_args_list]
+        self.assertIn("searchterm=LH490", urls[0])
+        self.assertTrue(urls[1].endswith("/live/flight/DLH490"))
+        self.assertIn("/history/20261016/", urls[2])
+        self.assertEqual((flight["ident"], flight["iataIdent"], flight["status"]), ("DLH490", "LH490", "scheduled"))
+        self.assertEqual(flight["from"], {"code": "FRA", "name": "Frankfurt", "lat": 50.03, "lon": 8.57})
+        self.assertEqual(flight["to"]["code"], "SEA")
+        self.assertFalse(flight["filedRoute"])
+        self.assertEqual(flight["departure"], 1792399500)
+        self.assertEqual(flight["previousDeparture"], 1792140300)
+        self.assertEqual(sorted(flight["paths"]), ["planned", "previous"])
+        self.assertEqual(flight["paths"]["previous"][1], [-20.0, 64.0])
+
+    def test_flight_in_the_air_uses_its_own_track(self):
+        airborne = _flightaware_flight("airborne", [[8.6, 50.0], [0.0, 55.0]], route="GNNRR3 ALCOA 3800N/14000W")
+        with tempfile.TemporaryDirectory() as tmp:
+            app = TurbliApp(Path(tmp))
+            routes = {
+                # A failed search falls back to the ident as typed.
+                "omnisearch": lambda: _http_error(500),
+                "/live/flight/DLH490": lambda: _fake_jpeg_response(_flightaware_page(airborne), "text/html"),
+            }
+            with patch("urllib.request.urlopen", side_effect=_router(routes)) as mocked:
+                flight = app.resolve_flight({"flight": "DLH490"})
+            self.assertEqual(mocked.call_count, 2)
+        self.assertTrue(flight["filedRoute"])
+        self.assertEqual(sorted(flight["paths"]), ["planned", "track"])
+
+    def test_flight_rejects_bad_numbers_and_unknown_flights(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = TurbliApp(Path(tmp))
+            with self.assertRaisesRegex(ValueError, "like LH490"):
+                app.resolve_flight({"flight": "SEA-MUC"})
+            routes = {
+                "omnisearch": lambda: _fake_jpeg_response(b'{"data": []}', "application/json"),
+                "/live/flight/": lambda: _fake_jpeg_response(_flightaware_page(None), "text/html"),
+            }
+            with patch("urllib.request.urlopen", side_effect=_router(routes)):
+                with self.assertRaisesRegex(ValueError, "no recent or upcoming flight XX9999"):
+                    app.resolve_flight({"flight": "XX9999"})
+            routes = {"flightaware": lambda: _http_error(403, b"<title>Just a moment...</title>")}
+            with patch("urllib.request.urlopen", side_effect=_router(routes)):
+                with self.assertRaisesRegex(ValueError, "FlightAware blocked the request"):
+                    app.resolve_flight({"flight": "LH490"})
 
 
 if __name__ == "__main__":

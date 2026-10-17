@@ -56,6 +56,17 @@ function greatCircle(a, b, segments = 128) {
   return points;
 }
 
+// Returns [lon, lat] points with longitudes unwrapped like greatCircle's, so a
+// track across the antimeridian stays continuous.
+function unwrapLongitudes(points) {
+  let previousLon = points.length ? points[0][0] : 0;
+  return points.map(([lon, lat]) => {
+    lon += 360 * Math.round((previousLon - lon) / 360);
+    previousLon = lon;
+    return [lon, lat];
+  });
+}
+
 // Returns [minLon, minLat, maxLon, maxLat] around points, padded for context.
 function paddedBbox(points) {
   const lons = points.map(p => p[0]);

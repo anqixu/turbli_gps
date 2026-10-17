@@ -346,13 +346,29 @@ function updateMapPlaneSize() {
   el.plane.style.height = `${state.planeSize.height}px`;
 }
 
+// Route lines, drawn in this order so the flown track lies on top.
+const ROUTE_LINES = [
+  ["previous", "route-line route-previous"],
+  ["planned", "route-line"],
+  ["track", "route-line route-track"]
+];
+
 function drawRoute() {
   el.routeSvg.innerHTML = "";
   if (!state.route) return;
-  const points = state.route.points.map(([lon, lat]) => lonLatToScreen(lon, lat));
-  const d = points.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-  el.routeSvg.appendChild(svgElement("path", { class: "route-line", d }));
-  for (const [[x, y], airport] of [[points[0], state.route.from], [points[points.length - 1], state.route.to]]) {
+  for (const [name, cls] of ROUTE_LINES) {
+    const line = state.route.lines[name];
+    if (!line) continue;
+    const d = line
+      .map(([lon, lat], i) => {
+        const [x, y] = lonLatToScreen(lon, lat);
+        return `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+    el.routeSvg.appendChild(svgElement("path", { class: cls, d }));
+  }
+  const ends = state.route.ends.map(([lon, lat]) => lonLatToScreen(lon, lat));
+  for (const [[x, y], airport] of [[ends[0], state.route.from], [ends[1], state.route.to]]) {
     el.routeSvg.appendChild(svgElement("circle", { class: "route-airport", cx: x, cy: y, r: 4 }));
     const label = svgElement("text", { class: "route-label", x: x + 7, y: y - 7 });
     label.textContent = airport.code;
@@ -675,22 +691,68 @@ async function fetchTurbliSource(force = false) {
   setStatus(`${label} ${source.cacheHit ? "loaded from cache" : "fetched and cached"}, valid ${source.forecastTime}`);
 }
 
+// Builds the drawable route: lines keyed by ROUTE_LINES name, each [lon, lat]
+// points unwrapped to the same side of the antimeridian as the departure.
+function routeFromLines(saved) {
+  const start = [saved.from.lon, saved.from.lat];
+  const lines = {};
+  for (const [name, points] of Object.entries(saved.lines)) {
+    lines[name] = unwrapLongitudes([start, ...points]).slice(1);
+  }
+  const ends = unwrapLongitudes([start, ...lines.planned, [saved.to.lon, saved.to.lat]]);
+  return { ...saved, lines, ends: [ends[0], ends[ends.length - 1]], points: Object.values(lines).flat() };
+}
+
+function saveRoute(saved) {
+  state.route = routeFromLines(saved);
+  try {
+    localStorage.setItem("turbliGpsRoute", JSON.stringify(saved));
+  } catch {}
+}
+
+// Text with a digit is a flight number (LH490); airport codes never have one.
+function isFlightNumber(text) {
+  return /\d/.test(text);
+}
+
 async function setRoute(text) {
+  if (isFlightNumber(text)) return setFlight(text);
   setStatus(`Looking up ${text}...`);
   const route = await withProgress(() => api("/api/route", { method: "POST", body: JSON.stringify({ route: text }) }));
-  state.route = { text, from: route.from, to: route.to, points: greatCircle(route.from, route.to) };
-  try {
-    localStorage.setItem("turbliGpsRoute", JSON.stringify({ text, from: route.from, to: route.to }));
-  } catch {}
+  saveRoute({ text, from: route.from, to: route.to, lines: { planned: greatCircle(route.from, route.to) } });
   el.region.value = "route";
   await selectRegion("route");
   setStatus(`Route ${route.from.code} (${route.from.name}) to ${route.to.code} (${route.to.name})`);
 }
 
+function formatEpoch(seconds) {
+  if (!seconds) return "";
+  return new Date(seconds * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+async function setFlight(text) {
+  setStatus(`Looking up flight ${text}...`);
+  const flight = await withProgress(() => api("/api/flight", { method: "POST", body: JSON.stringify({ flight: text }) }));
+  const lines = { ...flight.paths };
+  // Without a filed route FlightAware's waypoints are a coarse great circle; draw a smooth one.
+  if (!flight.filedRoute || !lines.planned) lines.planned = greatCircle(flight.from, flight.to);
+  saveRoute({ text, flight: flight.iataIdent, from: flight.from, to: flight.to, lines });
+  el.region.value = "route";
+  await selectRegion("route");
+  const departure = flight.departure ? `, departs ${formatEpoch(flight.departure)}` : "";
+  const notes = [flight.filedRoute ? "dashed: filed route" : "dashed: great circle, no filed route"];
+  if (lines.previous) notes.push(`faint: flight of ${formatEpoch(flight.previousDeparture)}`);
+  if (lines.track) notes.push("solid: flown so far");
+  setStatus(`${flight.iataIdent} ${flight.from.code} to ${flight.to.code}, ${flight.status}${departure} (${notes.join("; ")})`);
+}
+
 function loadRoute() {
   try {
     const saved = JSON.parse(localStorage.getItem("turbliGpsRoute") || "null");
-    return saved && { ...saved, points: greatCircle(saved.from, saved.to) };
+    if (!saved) return null;
+    // Routes saved before flight lookup kept only their airports.
+    if (!saved.lines) saved.lines = { planned: greatCircle(saved.from, saved.to) };
+    return routeFromLines(saved);
   } catch {
     return null;
   }
@@ -1151,7 +1213,7 @@ function bindEvents() {
     autofitOverlay().catch(error => setWarning(`Autofit failed: ${error.message}`));
   });
   el.region.addEventListener("change", () => {
-    if (el.region.value === "route" && !state.route) setStatus("Type a route like SEA-MUC");
+    if (el.region.value === "route" && !state.route) setStatus("Type a route like SEA-MUC or a flight like LH490");
     selectRegion(el.region.value)
       .then(() => setStatus(`Map switched to ${el.region.selectedOptions[0].textContent}`))
       .catch(error => setWarning(error.message));

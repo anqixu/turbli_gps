@@ -54,10 +54,19 @@ TURBLI_AIRPORTS_URL = f"{TURBLI_BASE_URL}/getAirports/"
 # The page that lists the current run; any region's page names the same run.
 GRID_CATALOG_REGION = "us"
 
+# FlightAware's public flight page embeds the flight as JSON (trackpollBootstrap):
+# its filed route decoded to waypoints, published hours before departure, and
+# its ADS-B track once airborne. Pages are keyed by ICAO ident (DLH490), which
+# FlightAware's own search box maps from the IATA flight number (LH490).
+FLIGHTAWARE_BASE_URL = "https://www.flightaware.com"
+FLIGHTAWARE_SEARCH_URL = f"{FLIGHTAWARE_BASE_URL}/ajax/ignoreall/omnisearch/flight.rvt"
+FLIGHT_RE = re.compile(r"[A-Z0-9]{2,3}\d{1,4}[A-Z]?")
+
 AIRPORT_RE = re.compile(r"(?:^|,)([^#,]*)#[^#]*#([A-Z0-9]{3})#[A-Z0-9]*#(-?\d+(?:\.\d+)?)#(-?\d+(?:\.\d+)?)#")
 MAP_PAGE_FRAME_RE = re.compile(r"/databases/GTG_(\d{8})_(\d{2})/figures/CAT_(\d{3})")
 MAP_PAGE_ALTITUDES_RE = re.compile(r"altitudes_ft\s*=\s*\(\"\[([\d,\s]+)\]\"\)")
 CLOUDFLARE_BLOCK_MARKERS = (b"Attention Required! | Cloudflare", b"Just a moment...", b"error code: 10")
+FLIGHTAWARE_BOOTSTRAP_RE = re.compile(r"trackpollBootstrap\s*=\s*(\{.*?\});\s*</script>", re.S)
 
 
 def local_iso(epoch: float | None = None) -> str:
@@ -171,13 +180,15 @@ def guessed_frames(now: datetime, lead_hours: int) -> Iterator[TurbliFrame]:
         label -= timedelta(hours=6)
 
 
-def describe_http_error(exc: urllib.error.HTTPError) -> TurbliFetchError:
+def describe_http_error(exc: urllib.error.HTTPError, service: str = "Turbli") -> TurbliFetchError:
     try:
         body = exc.read(4096) or b""
     except (OSError, ValueError):
         body = b""
     headers = exc.headers or {}
     blocked = exc.code == 429 or bool(headers.get("cf-mitigated")) or any(m in body for m in CLOUDFLARE_BLOCK_MARKERS)
+    if blocked and service != "Turbli":
+        return TurbliFetchError(f"{service} blocked the request (HTTP {exc.code})", blocked=True)
     if blocked:
         return TurbliFetchError(
             f"Turbli's Cloudflare bot check blocked the request (HTTP {exc.code}); "
@@ -185,7 +196,7 @@ def describe_http_error(exc: urllib.error.HTTPError) -> TurbliFetchError:
             blocked=True,
         )
     reason = f" {exc.reason}" if getattr(exc, "reason", None) else ""
-    return TurbliFetchError(f"failed to fetch Turbli image: HTTP {exc.code}{reason}")
+    return TurbliFetchError(f"failed to fetch {service} data: HTTP {exc.code}{reason}")
 
 
 ProgressCallback = Callable[[int, int | None], None]  # (bytes received, Content-Length or None)
@@ -208,7 +219,12 @@ def _read_url(
         return HttpBody(response.headers.get_content_type(), b"".join(chunks))
 
 
-def http_get(url: str, form: dict | None = None, on_progress: ProgressCallback | None = None) -> HttpBody:
+def http_get(
+    url: str,
+    form: dict | None = None,
+    on_progress: ProgressCallback | None = None,
+    service: str = "Turbli",
+) -> HttpBody:
     """GETs url, or POSTs form as application/x-www-form-urlencoded when given."""
     data = urllib.parse.urlencode(form).encode("ascii") if form is not None else None
     request = urllib.request.Request(url, data=data, headers={"User-Agent": TURBLI_USER_AGENT})
@@ -222,7 +238,7 @@ def http_get(url: str, form: dict | None = None, on_progress: ProgressCallback |
             logger.warning("TLS verification failed for %s; retrying without verification", url)
             return _read_url(request, ssl._create_unverified_context(), on_progress)
     except urllib.error.HTTPError as exc:
-        raise describe_http_error(exc) from exc
+        raise describe_http_error(exc, service) from exc
     except (urllib.error.URLError, OSError) as exc:
         raise TurbliFetchError(f"offline or network error: {exc}") from exc
 
@@ -259,6 +275,54 @@ def parse_airports(text: str) -> dict[str, dict]:
         code: {"code": code, "name": city.strip(), "lat": float(lat), "lon": float(lon)}
         for city, code, lat, lon in AIRPORT_RE.findall(text)
     }
+
+
+def parse_flightaware_page(html: str) -> dict | None:
+    """Returns the flight a FlightAware flight page shows, or None if it shows none."""
+    match = FLIGHTAWARE_BOOTSTRAP_RE.search(html)
+    if not match:
+        return None
+    try:
+        flights = json.loads(match.group(1)).get("flights") or {}
+    except ValueError:
+        return None
+    flight = next(iter(flights.values()), None)
+    if not isinstance(flight, dict) or flight.get("unknown") or not flight.get("origin"):
+        return None
+    return flight
+
+
+def flightaware_airport(airport: dict) -> dict:
+    lon, lat = airport["coord"]
+    return {
+        "code": airport.get("iata") or airport.get("icao") or "",
+        "name": airport.get("friendlyLocation") or airport.get("friendlyName") or "",
+        "lat": float(lat),
+        "lon": float(lon),
+    }
+
+
+def flightaware_track(flight: dict) -> list[list[float]]:
+    return [[float(p["coord"][0]), float(p["coord"][1])] for p in flight.get("track") or [] if p.get("coord")]
+
+
+def has_filed_route(flight: dict) -> bool:
+    """True when the flight plan names a route; otherwise its waypoints are a great circle.
+
+    FlightAware knows filed routes for flights in FAA airspace. For others the
+    route is just the destination (for example "SEA").
+    """
+    route = str((flight.get("flightPlan") or {}).get("route") or "")
+    return len(route.split()) > 1
+
+
+def pick_flight_ident(results: list[dict], ident: str) -> str:
+    """Picks the airline flight from FlightAware's search, which also lists tail numbers."""
+    for test in (lambda r: r.get("major_airline") == "1", lambda r: not r.get("might_be_a_tail")):
+        match = next((r["ident"] for r in results if r.get("ident") and test(r)), None)
+        if match:
+            return match
+    return ident
 
 
 def parse_altitude(value: object) -> int:
@@ -298,14 +362,14 @@ class TurbliApp:
     def read_progress(self) -> dict:
         return dict(self.progress)
 
-    def tracked_get(self, label: str, url: str, form: dict | None = None) -> HttpBody:
+    def tracked_get(self, label: str, url: str, form: dict | None = None, service: str = "Turbli") -> HttpBody:
         """http_get that publishes its progress under label."""
         self.progress = {"label": label, "received": 0, "total": None, "estimate": self.expected_sizes.get(label)}
 
         def on_progress(received: int, total: int | None) -> None:
             self.progress = {**self.progress, "received": received, "total": total}
 
-        body = http_get(url, form, on_progress)
+        body = http_get(url, form, on_progress, service)
         self.expected_sizes[label] = len(body.data)
         return body
 
@@ -556,6 +620,79 @@ class TurbliApp:
             raise ValueError(f"unknown airport code: {', '.join(missing)}")
         return {"from": airports[codes[0].upper()], "to": airports[codes[1].upper()]}
 
+    def resolve_flight(self, payload: dict) -> dict:
+        """Looks a flight number up on FlightAware and returns its endpoints and paths.
+
+        paths holds [lon, lat] lists: "planned" (the filed route, or a great
+        circle when none is filed), "track" (this flight's positions so far) and,
+        before departure, "previous" (the last completed flight's track, which
+        shows the route the airline flies when none is filed).
+        """
+        ident = re.sub(r"[^A-Z0-9]", "", str(payload.get("flight") or "").upper())
+        if not FLIGHT_RE.fullmatch(ident):
+            raise ValueError("flight must be an airline code and number, like LH490")
+        try:
+            search = self.tracked_get(
+                "Searching FlightAware",
+                f"{FLIGHTAWARE_SEARCH_URL}?{urllib.parse.urlencode({'searchterm': ident, 'v': 50})}",
+                service="FlightAware",
+            )
+            results = json.loads(search.data).get("data") or []
+        except (TurbliFetchError, ValueError, AttributeError) as exc:
+            logger.warning("FlightAware search for %s failed: %s", ident, exc)
+            results = []
+        icao_ident = pick_flight_ident(results, ident)
+        flight = self.flightaware_flight(f"/live/flight/{urllib.parse.quote(icao_ident)}", "Downloading FlightAware flight")
+        if flight is None:
+            raise ValueError(f"FlightAware has no recent or upcoming flight {ident}")
+
+        paths = {"planned": [[float(lon), float(lat)] for lon, lat in flight.get("waypoints") or []]}
+        track = flightaware_track(flight)
+        if track:
+            paths["track"] = track
+        previous_departure = None
+        if len(track) < 2:
+            previous = self.previous_flight(flight)
+            if previous:
+                paths["previous"] = flightaware_track(previous)
+                previous_departure = (previous.get("gateDepartureTimes") or {}).get("actual")
+        times = flight.get("gateDepartureTimes") or {}
+        return {
+            "flight": ident,
+            "ident": flight.get("ident") or icao_ident,
+            "iataIdent": flight.get("iataIdent") or ident,
+            "status": flight.get("flightStatus") or "scheduled",
+            "departure": times.get("actual") or times.get("estimated") or times.get("scheduled"),
+            "previousDeparture": previous_departure,
+            "filedRoute": has_filed_route(flight),
+            "route": (flight.get("flightPlan") or {}).get("route") or "",
+            "from": flightaware_airport(flight["origin"]),
+            "to": flightaware_airport(flight["destination"]),
+            "paths": {name: points for name, points in paths.items() if len(points) >= 2},
+        }
+
+    def flightaware_flight(self, path: str, label: str) -> dict | None:
+        try:
+            page = self.tracked_get(label, f"{FLIGHTAWARE_BASE_URL}{path}", service="FlightAware")
+        except TurbliFetchError as exc:
+            raise ValueError(f"FlightAware lookup failed: {exc}") from exc
+        return parse_flightaware_page(page.data.decode("utf-8", errors="replace"))
+
+    def previous_flight(self, flight: dict) -> dict | None:
+        """The most recent arrived flight of the same flight number, with its track."""
+        past = [
+            entry
+            for entry in (flight.get("activityLog") or {}).get("flights") or []
+            if entry.get("flightStatus") == "arrived" and (entry.get("links") or {}).get("permanent")
+        ]
+        if not past:
+            return None
+        try:
+            return self.flightaware_flight(past[0]["links"]["permanent"], "Downloading the previous flight's track")
+        except ValueError as exc:
+            logger.warning("Could not read the previous flight of %s: %s", flight.get("ident"), exc)
+            return None
+
     def airports(self) -> dict[str, dict]:
         """Turbli's airport list, downloaded once and kept under data/."""
         with self._lock:
@@ -644,6 +781,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(APP.fetch_turbli_grid(payload), HTTPStatus.CREATED)
             elif parsed.path == "/api/route":
                 self.send_json(APP.resolve_route(payload))
+            elif parsed.path == "/api/flight":
+                self.send_json(APP.resolve_flight(payload))
             else:
                 self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:

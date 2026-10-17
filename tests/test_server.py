@@ -91,6 +91,8 @@ def test_handler_post_routes(tmp_path):
         assert post("/api/unknown", {}).status == HTTPStatus.NOT_FOUND
         with patch.object(app, "fetch_turbli_image", return_value={"id": "x"}):
             assert post("/api/turbli/fetch", {"latest": True}).status == HTTPStatus.CREATED
+        with patch.object(app, "resolve_flight", return_value={"ident": "DLH490"}):
+            assert post("/api/flight", {"flight": "LH490"}).json() == {"ident": "DLH490"}
 
 
 def test_handler_read_json_limits():
