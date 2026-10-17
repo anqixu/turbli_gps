@@ -44,6 +44,9 @@ const state = {
   panelGesture: null,
   suppressPanelClick: false,
   saveTimer: null,
+  // The legend shows while a mouse hovers it or after a tap pins it open.
+  legendHovered: false,
+  legendPinned: false,
   // Set while an alignment save should not announce itself (autofit success).
   quietSave: false,
   toastTimer: null
@@ -90,6 +93,11 @@ const el = {
   altitudeFetch: document.querySelector("#altitudeFetchSelect"),
   leadFetch: document.querySelector("#leadFetchSelect"),
   opacity: document.querySelector("#opacityInput"),
+  legend: document.querySelector("#legend"),
+  legendButton: document.querySelector("#legendButton"),
+  legendCard: document.querySelector("#legendCard"),
+  legendClose: document.querySelector("#legendClose"),
+  legendScale: document.querySelector("#legendScale"),
   wireframe: document.querySelector("#wireframeInput")
 };
 
@@ -402,6 +410,67 @@ function updateLayerStyles() {
   el.gridBackground.hidden = !state.grid;
   el.overlay.style.opacity = el.opacity.value;
   el.gridCanvas.style.opacity = el.opacity.value;
+  drawLegendScale(background);
+}
+
+// Draws the turbulence colour bar as the grid shows it: the dark map, the white
+// background at its opacity, then Turbli's colours at the grid's opacity.
+// The bar spans EDR x 100 from 0 to 40, as on turbli.com.
+function drawLegendScale(background) {
+  const canvas = el.legendScale;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#151b20";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = `rgba(255, 255, 255, ${background})`;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const opacity = Number(el.opacity.value);
+  for (let x = 0; x < canvas.width; x++) {
+    const l = Math.round(((x + 0.5) / canvas.width) * 40 * LUT_STEPS) * 4;
+    const [r, g, b, a] = TURBULENCE_LUT.subarray(l, l + 4);
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${(a / 255) * opacity})`;
+    ctx.fillRect(x, 0, 1, canvas.height);
+  }
+}
+
+function updateLegend() {
+  const open = state.legendHovered || state.legendPinned;
+  el.legendCard.hidden = !open;
+  el.legendButton.setAttribute("aria-expanded", String(open));
+}
+
+function bindLegend() {
+  // Gestures on the legend must not pan or zoom the map under it.
+  for (const type of ["pointerdown", "wheel", "dblclick"]) {
+    el.legend.addEventListener(type, event => event.stopPropagation());
+  }
+  el.legend.addEventListener("pointerenter", event => {
+    if (event.pointerType !== "mouse") return;
+    state.legendHovered = true;
+    updateLegend();
+  });
+  el.legend.addEventListener("pointerleave", event => {
+    if (event.pointerType !== "mouse") return;
+    state.legendHovered = false;
+    updateLegend();
+  });
+  el.legendButton.addEventListener("click", () => {
+    state.legendPinned = !state.legendPinned;
+    updateLegend();
+  });
+  el.legendClose.addEventListener("click", () => {
+    state.legendPinned = state.legendHovered = false;
+    updateLegend();
+  });
+  document.addEventListener("pointerdown", event => {
+    if (!state.legendPinned || el.legend.contains(event.target)) return;
+    state.legendPinned = false;
+    updateLegend();
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || el.legendCard.hidden) return;
+    state.legendPinned = state.legendHovered = false;
+    updateLegend();
+  });
 }
 
 function loadViewSettings() {
@@ -1134,6 +1203,7 @@ function bindPanelHandle() {
 }
 
 function bindEvents() {
+  bindLegend();
   bindPanelHandle();
   el.toast.addEventListener("click", hideToast);
   el.modeToggle.addEventListener("click", () => {

@@ -159,6 +159,7 @@ Open `http://127.0.0.1:8765` in your browser.
 - **Image:** toggles between aligning the image and moving the canvas.
 - **Clipboard:** opens image upload; pasted or dropped images also work.
 - **Hamburger:** expands or collapses the control pane.
+- **Legend:** the button at the map's bottom right shows the turbulence colour scale (EDR x 100, 0 to 40, as on turbli.com, drawn at the current slider settings) and the route line types. It opens while the mouse is over it and closes when the mouse leaves; a tap or click keeps it open until you press ×, tap elsewhere, or press Esc.
 - **Turbulence** and **Background** sliders: the opacity of the turbulence grid or map image, and of a white background under the grid that recreates turbli.com's look. The map outlines are always drawn on top.
 
 Two-finger gestures zoom and rotate about the point between the fingers, and the mouse wheel zooms about the cursor, whether moving the map or the image.
