@@ -146,25 +146,36 @@ input[type="text"] {
 
 .route-svg {
   pointer-events: none;
+  /* A dark halo keeps the lines readable over turbulence and the white background. */
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.9));
 }
 
 .route-line {
   fill: none;
-  stroke: #ff5fd2;
-  stroke-width: 2px;
-  stroke-dasharray: 7 4;
+  stroke-linecap: round;
   vector-effect: non-scaling-stroke;
 }
 
+.route-great-circle {
+  stroke: #ffffff;
+  stroke-width: 2px;
+  stroke-dasharray: 0.5 5;
+}
+
+.route-filed {
+  stroke: #ff5fd2;
+  stroke-width: 2px;
+  stroke-dasharray: 8 5;
+}
+
 .route-track {
-  stroke-width: 2.5px;
-  stroke-dasharray: none;
+  stroke: #ff5fd2;
+  stroke-width: 3px;
 }
 
 .route-previous {
-  stroke-width: 3px;
-  stroke-dasharray: none;
-  stroke-opacity: 0.4;
+  stroke: #b6ff3b;
+  stroke-width: 2px;
 }
 
 .route-airport {
@@ -275,7 +286,7 @@ input[type="text"] {
 
 .legend-card {
   position: relative;
-  width: 232px;
+  width: 252px;
   padding: 10px 12px 8px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -297,7 +308,7 @@ input[type="text"] {
   text-transform: uppercase;
 }
 
-.legend-bands + h3 {
+.legend-bands + #legendRoute h3 {
   margin-top: 12px;
 }
 
@@ -357,6 +368,7 @@ input[type="text"] {
 .legend-lines svg {
   flex: 0 0 36px;
   height: 10px;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.9));
 }
 
 .position-dot,

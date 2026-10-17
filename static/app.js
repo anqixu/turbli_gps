@@ -98,6 +98,8 @@ const el = {
   legendCard: document.querySelector("#legendCard"),
   legendClose: document.querySelector("#legendClose"),
   legendScale: document.querySelector("#legendScale"),
+  legendRoute: document.querySelector("#legendRoute"),
+  legendLines: document.querySelector("#legendLines"),
   wireframe: document.querySelector("#wireframeInput")
 };
 
@@ -354,11 +356,15 @@ function updateMapPlaneSize() {
   el.plane.style.height = `${state.planeSize.height}px`;
 }
 
-// Route lines, drawn in this order so the flown track lies on top.
+// Route lines, drawn in this order so the flown track lies on top. Colour
+// tells whose line it is (white: geometry, pink: this flight, lime: the
+// previous flight) and the dash tells plan from flight. label(route) is the
+// legend entry.
 const ROUTE_LINES = [
-  ["previous", "route-line route-previous"],
-  ["planned", "route-line"],
-  ["track", "route-line route-track"]
+  ["greatCircle", "route-great-circle", () => "Great circle (shortest)"],
+  ["previous", "route-previous", route => `Previous flight${route.previousDeparture ? `, ${new Date(route.previousDeparture * 1000).toLocaleDateString([], { month: "short", day: "numeric" })}` : ""}`],
+  ["filed", "route-filed", () => "Filed route (plan)"],
+  ["track", "route-track", () => "This flight, flown"]
 ];
 
 function drawRoute() {
@@ -373,7 +379,7 @@ function drawRoute() {
         return `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
       })
       .join(" ");
-    el.routeSvg.appendChild(svgElement("path", { class: cls, d }));
+    el.routeSvg.appendChild(svgElement("path", { class: `route-line ${cls}`, d }));
   }
   const ends = state.route.ends.map(([lon, lat]) => lonLatToScreen(lon, lat));
   for (const [[x, y], airport] of [[ends[0], state.route.from], [ends[1], state.route.to]]) {
@@ -430,6 +436,21 @@ function drawLegendScale(background) {
     ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${(a / 255) * opacity})`;
     ctx.fillRect(x, 0, 1, canvas.height);
   }
+}
+
+// Lists the route lines on the map, each with a sample of its style.
+function updateLegendLines() {
+  const drawn = ROUTE_LINES.filter(([name]) => state.route?.lines[name]);
+  el.legendRoute.hidden = !drawn.length;
+  el.legendLines.replaceChildren(
+    ...drawn.map(([, cls, label]) => {
+      const item = document.createElement("li");
+      const sample = svgElement("svg", { viewBox: "0 0 36 10", "aria-hidden": "true" });
+      sample.appendChild(svgElement("line", { class: `route-line ${cls}`, x1: 3, y1: 5, x2: 33, y2: 5 }));
+      item.append(sample, label(state.route));
+      return item;
+    })
+  );
 }
 
 function updateLegend() {
@@ -760,20 +781,23 @@ async function fetchTurbliSource(force = false) {
   setStatus(`${label} ${source.cacheHit ? "loaded from cache" : "fetched and cached"}, valid ${source.forecastTime}`);
 }
 
-// Builds the drawable route: lines keyed by ROUTE_LINES name, each [lon, lat]
-// points unwrapped to the same side of the antimeridian as the departure.
+// Builds the drawable route: the great circle plus saved.lines, keyed by
+// ROUTE_LINES name, each [lon, lat] points unwrapped to the same side of the
+// antimeridian as the departure.
 function routeFromLines(saved) {
   const start = [saved.from.lon, saved.from.lat];
-  const lines = {};
-  for (const [name, points] of Object.entries(saved.lines)) {
-    lines[name] = unwrapLongitudes([start, ...points]).slice(1);
+  const lines = { greatCircle: greatCircle(saved.from, saved.to) };
+  for (const [name] of ROUTE_LINES) {
+    const points = saved.lines?.[name];
+    if (name !== "greatCircle" && points?.length >= 2) lines[name] = unwrapLongitudes([start, ...points]).slice(1);
   }
-  const ends = unwrapLongitudes([start, ...lines.planned, [saved.to.lon, saved.to.lat]]);
+  const ends = unwrapLongitudes([start, ...lines.greatCircle, [saved.to.lon, saved.to.lat]]);
   return { ...saved, lines, ends: [ends[0], ends[ends.length - 1]], points: Object.values(lines).flat() };
 }
 
 function saveRoute(saved) {
   state.route = routeFromLines(saved);
+  updateLegendLines();
   try {
     localStorage.setItem("turbliGpsRoute", JSON.stringify(saved));
   } catch {}
@@ -788,7 +812,7 @@ async function setRoute(text) {
   if (isFlightNumber(text)) return setFlight(text);
   setStatus(`Looking up ${text}...`);
   const route = await withProgress(() => api("/api/route", { method: "POST", body: JSON.stringify({ route: text }) }));
-  saveRoute({ text, from: route.from, to: route.to, lines: { planned: greatCircle(route.from, route.to) } });
+  saveRoute({ text, from: route.from, to: route.to, lines: {} });
   el.region.value = "route";
   await selectRegion("route");
   setStatus(`Route ${route.from.code} (${route.from.name}) to ${route.to.code} (${route.to.name})`);
@@ -802,26 +826,30 @@ function formatEpoch(seconds) {
 async function setFlight(text) {
   setStatus(`Looking up flight ${text}...`);
   const flight = await withProgress(() => api("/api/flight", { method: "POST", body: JSON.stringify({ flight: text }) }));
-  const lines = { ...flight.paths };
-  // Without a filed route FlightAware's waypoints are a coarse great circle; draw a smooth one.
-  if (!flight.filedRoute || !lines.planned) lines.planned = greatCircle(flight.from, flight.to);
-  saveRoute({ text, flight: flight.iataIdent, from: flight.from, to: flight.to, lines });
+  const { planned, track, previous } = flight.paths;
+  // Without a filed route FlightAware's waypoints are only a coarse great
+  // circle, which the great-circle line already shows.
+  const lines = { filed: flight.filedRoute ? planned : undefined, track, previous };
+  saveRoute({
+    text,
+    flight: flight.iataIdent,
+    from: flight.from,
+    to: flight.to,
+    previousDeparture: flight.previousDeparture,
+    lines
+  });
   el.region.value = "route";
   await selectRegion("route");
   const departure = flight.departure ? `, departs ${formatEpoch(flight.departure)}` : "";
-  const notes = [flight.filedRoute ? "dashed: filed route" : "dashed: great circle, no filed route"];
-  if (lines.previous) notes.push(`faint: flight of ${formatEpoch(flight.previousDeparture)}`);
-  if (lines.track) notes.push("solid: flown so far");
-  setStatus(`${flight.iataIdent} ${flight.from.code} to ${flight.to.code}, ${flight.status}${departure} (${notes.join("; ")})`);
+  const filed = flight.filedRoute ? "filed route found" : "no filed route";
+  setStatus(`${flight.iataIdent} ${flight.from.code} to ${flight.to.code}, ${flight.status}${departure}, ${filed}`);
 }
 
 function loadRoute() {
   try {
     const saved = JSON.parse(localStorage.getItem("turbliGpsRoute") || "null");
-    if (!saved) return null;
-    // Routes saved before flight lookup kept only their airports.
-    if (!saved.lines) saved.lines = { planned: greatCircle(saved.from, saved.to) };
-    return routeFromLines(saved);
+    // Lines saved under older names are dropped; the great circle is always drawn.
+    return saved && routeFromLines(saved);
   } catch {
     return null;
   }
@@ -1355,6 +1383,7 @@ async function start() {
   bindEvents();
   state.route = loadRoute();
   if (state.route) el.routeInput.value = state.route.text;
+  updateLegendLines();
   try {
     const region = localStorage.getItem("turbliGpsRegion");
     if (REGIONS[region]) el.region.value = region;

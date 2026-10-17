@@ -115,7 +115,7 @@ The following facts about that layout drive the fetch logic:
 
 Free flight trackers were tested for paths that are known before a flight. Flightradar24's API and AirNav Radar answer scripts with a Cloudflare challenge (HTTP 403). adsbdb, adsb.lol and OpenSky return only a callsign's two airports, not its path. FlightAware's public flight page needs no key and embeds the flight as JSON (`trackpollBootstrap`), so the server reads that:
 
-- `waypoints` is the filed flight plan decoded to positions, published hours before departure. FlightAware has filed routes for flights in FAA airspace (US departures and arrivals from the US). For others the flight plan names only the destination, the waypoints are a great circle, and the app draws its own great circle instead.
+- `waypoints` is the filed flight plan decoded to positions, published hours before departure. FlightAware has filed routes for flights in FAA airspace (US departures and arrivals from the US). For others the flight plan names only the destination, the waypoints are a great circle, so the app draws no filed route and shows only its own great circle.
 - `track` holds the ADS-B positions flown so far.
 - `activityLog` lists the same flight number's recent flights. Before departure the server reads the latest arrived one, whose track shows the route the airline actually flies, which matters most when no route is filed. On 2026-10-16, Lufthansa 490 from Frankfurt to Seattle flew up to 330 km from the great circle.
 
@@ -153,13 +153,13 @@ Open `http://127.0.0.1:8765` in your browser.
 
 - **Cloud:** fetches Turbli's turbulence grid, or its map image when Data is set to "Map image", for the selected altitude and forecast lead time ("Now" to +24 h). Changing altitude or lead time re-fetches the grid. The status line shows download progress; Turbli sends no `Content-Length`, so the percentage is estimated from the previous download of the same kind.
 - **Target:** autofits the outlines to the current image. A badge on the button marks a failed fit; hover over it for the reason.
-- **Route or flight:** type two airport codes, such as `SEA-MUC`, to draw the great circle, or a flight number, such as `LH490`, to draw the flight's paths; either way the view fits to it. Text with a digit is a flight number. For a flight, the dashed line is the filed route (or the great circle when none is filed), the solid line is the track flown so far, and the faint line is the previous flight's track.
+- **Route or flight:** type two airport codes, such as `SEA-MUC`, to draw the great circle, or a flight number, such as `LH490`, to draw the flight's paths; either way the view fits to it. Text with a digit is a flight number. The great circle is always drawn as a white dotted line. For a flight, the pink dashed line is its filed route, the pink solid line is its track flown so far, and the lime line is the previous flight's track; colour tells whose line it is and the dash tells plan from flight.
 - **Compass:** starts or stops browser GPS tracking; it turns green while tracking.
 - **Reset:** returns the map view to its default position.
 - **Image:** toggles between aligning the image and moving the canvas.
 - **Clipboard:** opens image upload; pasted or dropped images also work.
 - **Hamburger:** expands or collapses the control pane.
-- **Legend:** the button at the map's bottom right shows the turbulence colour scale (EDR x 100, 0 to 40, as on turbli.com, drawn at the current slider settings) and the route line types. It opens while the mouse is over it and closes when the mouse leaves; a tap or click keeps it open until you press ×, tap elsewhere, or press Esc.
+- **Legend:** the button at the map's bottom right shows the turbulence colour scale (EDR x 100, 0 to 40, as on turbli.com, drawn at the current slider settings) and the route lines on the map, one entry each. It opens while the mouse is over it and closes when the mouse leaves; a tap or click keeps it open until you press ×, tap elsewhere, or press Esc.
 - **Turbulence** and **Background** sliders: the opacity of the turbulence grid or map image, and of a white background under the grid that recreates turbli.com's look. The map outlines are always drawn on top.
 
 Two-finger gestures zoom and rotate about the point between the fingers, and the mouse wheel zooms about the cursor, whether moving the map or the image.
